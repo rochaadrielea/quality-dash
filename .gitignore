@@ -1,0 +1,17 @@
+*.xlsx 
+.streamlit_password 
+__pycache__/ 
+data/ 
+*.pyc 
+create_sample_db.py 
+make_brm.py 
+make_excel.py 
+ingest.py 
+brm_queries.py 
+d.py 
+*.ps1 
+*.bat 
+*.sql 
+*.sqlite3-query 
+SERVICE_SETUP.md 
+.vscode/ 
