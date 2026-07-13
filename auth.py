@@ -1,25 +1,17 @@
 """
-auth.py -- password gate for Streamlit Community Cloud.
-Password is read from st.secrets["app_password"], set in the app's
-Settings -> Secrets (never stored in the repo).
+auth.py — password gate for Streamlit Community Cloud.
+Password is stored in the app's Settings -> Secrets (never in the repo).
 """
-
-import hashlib
 import streamlit as st
 
 
-def _hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
 def check_password() -> bool:
-    # already signed in this session
     if st.session_state.get("authenticated"):
         return True
 
     stored = st.secrets.get("app_password", None)
     if stored is None:
-        st.error("No password configured. Set 'app_password' in the app's Secrets.")
+        st.error("No password configured. Set 'app_password' in Settings -> Secrets.")
         return False
 
     st.title("Quality BRM Dashboard")
