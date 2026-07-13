@@ -1,6 +1,7 @@
 """
 app.py — Quality BRM Dashboard
 Interactive charts with tooltips explaining every measurement and data source.
+Compatible with both old (tracker-only) and new (merged) quality.db schemas.
 """
 from datetime import datetime, date
 from io import BytesIO
@@ -68,6 +69,15 @@ def _q(sql, params=None):
         return pd.read_sql(sql, conn, params=params or [])
 
 
+def _has_column(col_name):
+    """Check if a column exists in the nc table."""
+    try:
+        cols = _q("PRAGMA table_info(nc)")
+        return col_name in cols["name"].values
+    except Exception:
+        return False
+
+
 def to_excel_bytes(df, sheet_name="Data"):
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -85,6 +95,10 @@ CHART_CONFIG = {
     },
     "displaylogo": False,
 }
+
+# Check schema once at startup
+HAS_SOURCE = _has_column("source")
+HAS_COPQ = _has_column("copq")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -106,10 +120,10 @@ with st.sidebar:
 
     exercise_start = st.date_input(
         "Exercise start date", value=date(2025, 6, 1),
-        help="The date when the NC closure exercise was defined. All burndown metrics use this as the baseline. Agreed in the quality review meeting.")
+        help="The date when the NC closure exercise was defined. All burndown metrics use this as the baseline.")
     target_deadline = st.date_input(
         "Closure target deadline", value=date(2026, 9, 30),
-        help="Target date to close all backlog NCs. The weekly/monthly targets are calculated from the remaining open NCs divided by weeks until this date.")
+        help="Target date to close all backlog NCs. Weekly/monthly targets are calculated from remaining open NCs divided by weeks until this date.")
 
     st.markdown("---")
     st.markdown("**Period filter** (dashboard + trends)")
@@ -128,11 +142,11 @@ with st.sidebar:
     _owners = _q("SELECT DISTINCT COALESCE(owner,'(no owner)') AS o FROM nc ORDER BY o")["o"].tolist()
     nc_owner = st.multiselect("Owner", _owners, default=[])
 
-    _sources = _q("SELECT DISTINCT source FROM nc WHERE source IS NOT NULL ORDER BY source")["source"].tolist()
-    if _sources:
-        nc_source = st.selectbox("Data source", ["All"] + _sources)
-    else:
-        nc_source = "All"
+    nc_source = "All"
+    if HAS_SOURCE:
+        _sources = _q("SELECT DISTINCT source FROM nc WHERE source IS NOT NULL ORDER BY source")["source"].tolist()
+        if _sources:
+            nc_source = st.selectbox("Data source", ["All"] + _sources)
 
     if st.button("Reset filters"):
         st.session_state.clear()
@@ -158,7 +172,7 @@ def build_where(extra=None, date_col="created_on", use_date=True):
     if nc_owner:
         cl.append(f"COALESCE(owner,'(no owner)') IN ({','.join(['?']*len(nc_owner))})")
         pr.extend(nc_owner)
-    if nc_source != "All":
+    if HAS_SOURCE and nc_source != "All":
         cl.append("source = ?"); pr.append(nc_source)
     if extra:
         for s, p in extra: cl.append(s); pr.extend(p)
@@ -203,27 +217,27 @@ team_size = 11
 
 b1, b2, b3, b4 = st.columns(4)
 b1.metric("Backlog at freeze", int(backlog_at_start),
-          help=f"NCs that were open on {exercise_start.strftime('%d.%m.%Y')} — the starting point of the closure exercise. Includes NCs created before that date that were either still open or closed after that date. This is the fixed denominator for the burndown progress bar.")
+          help=f"NCs that were open on {exercise_start.strftime('%d.%m.%Y')} — the starting point of the closure exercise. Includes NCs created before that date that were either still open or closed after that date.")
 b2.metric("Closed since start", int(closed_from_backlog),
-          help=f"NCs from the original backlog that have been closed since {exercise_start.strftime('%d.%m.%Y')}. Only counts NCs created before the exercise start with a closure_date after it. This is the team's measurable progress against the backlog.")
+          help=f"NCs from the original backlog that have been closed since {exercise_start.strftime('%d.%m.%Y')}. Only counts NCs created before the exercise start with a closure_date after it.")
 b3.metric("Still open (backlog)", int(still_open_backlog),
           help=f"Remaining NCs from the original backlog (created before {exercise_start.strftime('%d.%m.%Y')}) that are still open. This number should decrease toward zero by the closure deadline.")
 b4.metric("Total open now", int(total_open),
-          help="All currently open NCs across the entire database — includes the original backlog plus any new NCs opened after the exercise started. This is the real workload the team faces.")
+          help="All currently open NCs — includes the original backlog plus any new NCs opened after the exercise started.")
 
 b5, b6, b7, b8 = st.columns(4)
 b5.metric("New since start", int(new_since_start),
-          help=f"NCs created after {exercise_start.strftime('%d.%m.%Y')}. These are new quality issues that arrived on top of the original backlog — the inflow that prevents the backlog from shrinking even when the team closes NCs.")
+          help=f"NCs created after {exercise_start.strftime('%d.%m.%Y')}. New quality issues arriving on top of the original backlog.")
 b6.metric("New still open", int(new_still_open),
-          help="Of the new NCs created since the exercise start, how many remain open. High numbers here mean the team is not keeping up with the incoming rate.")
+          help="Of the new NCs created since the exercise start, how many remain open.")
 b7.metric("Avg new / week", f"{avg_new_wk}",
-          help=f"{int(new_since_start)} new NCs ÷ {weeks_elapsed:.0f} weeks elapsed = {avg_new_wk} NCs/week average inflow. This rate is factored into the weekly target so the team knows how many to close beyond just the backlog.")
+          help=f"{int(new_since_start)} new NCs ÷ {weeks_elapsed:.0f} weeks elapsed = {avg_new_wk} NCs/week average inflow.")
 b8.metric("Target / week", f"{weekly_target} NCs",
-          help=f"{int(total_open)} open NCs ÷ {weeks_left:.0f} weeks to deadline + {avg_new_wk} avg weekly inflow = {weekly_target} NCs/week.\n\nWith {team_size} team members: ~{max(1, round(weekly_target / team_size, 1))} NC per person per week.\n\nIf we do 1 NC/person/week: {team_size}/week × {weeks_left:.0f} weeks = {int(team_size * weeks_left)} closures possible vs {int(total_open)} needed.")
+          help=f"{int(total_open)} open ÷ {weeks_left:.0f} weeks to deadline + {avg_new_wk} avg weekly inflow = {weekly_target} NCs/week.\n\nWith {team_size} team members: ~{max(1, round(weekly_target / team_size, 1))} NC per person per week.")
 
 progress = closed_from_backlog / max(1, backlog_at_start)
 st.progress(min(progress, 1.0), text=f"Backlog closure: {int(closed_from_backlog)} / {int(backlog_at_start)} ({progress:.0%})")
-st.caption(f"Progress bar = closures from original backlog ÷ backlog at freeze. Does not include new NCs opened after {exercise_start.strftime('%d.%m.%Y')}.")
+st.caption(f"Progress = closures from original backlog ÷ backlog at freeze. Does not include new NCs opened after {exercise_start.strftime('%d.%m.%Y')}.")
 
 st.markdown("**Monthly burndown — closures vs target path**")
 bd = _q("""
@@ -250,7 +264,7 @@ if not bd.empty:
     fig.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
                       legend=dict(orientation="h", y=-0.15), xaxis_title="", yaxis_title="NCs")
     st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
-    st.caption(f"Green bars = NCs closed per month from the original backlog. Orange line = remaining backlog count. Dashed blue line = linear path from {int(backlog_at_start)} to zero by {target_deadline.strftime('%d.%m.%Y')}. When the orange line is above the dashed line, the team is behind target.")
+    st.caption(f"Green bars = NCs closed per month from the original backlog. Orange line = remaining backlog. Dashed blue = linear path from {int(backlog_at_start)} to zero by {target_deadline.strftime('%d.%m.%Y')}. When orange is above dashed, the team is behind target.")
 
     dl1, dl2, _ = st.columns([1, 1, 4])
     with dl1:
@@ -277,14 +291,14 @@ cm_pace = round(cm_closed / max(1, cm_day) * 22)
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Opened this month", int(cm_opened),
-          help=f"NCs with created_on in {cm_label}. New quality issues entering the queue this month.")
+          help=f"NCs with created_on in {cm_label}. New quality issues entering the queue.")
 m2.metric("Closed this month", int(cm_closed),
-          help=f"NCs with closure_date in {cm_label}. The team's closure output this month.")
+          help=f"NCs with closure_date in {cm_label}. The team's closure output.")
 m3.metric("Net (closed − opened)", int(cm_closed - cm_opened),
           delta_color="normal" if cm_closed >= cm_opened else "inverse",
-          help="Closed minus opened this month. Positive = backlog is shrinking. Negative = backlog is growing faster than the team can close. Target: always positive.")
+          help="Closed minus opened. Positive = backlog shrinking. Negative = backlog growing. Target: always positive.")
 m4.metric("Projected monthly close", cm_pace,
-          help=f"Linear projection: {int(cm_closed)} closures in {cm_day} calendar days × 22 working days ≈ {cm_pace} by month end. This projection is more reliable after the 15th of the month.")
+          help=f"Linear projection: {int(cm_closed)} closures in {cm_day} days × 22 working days ≈ {cm_pace} by month end. More reliable after the 15th.")
 
 st.markdown("**Monthly opens vs closes (since exercise start)**")
 df_mo = _q("""
@@ -308,7 +322,7 @@ if not df_mo.empty:
     fig.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0), barmode="group",
                       legend=dict(orientation="h", y=-0.15), xaxis_title="", yaxis_title="NCs")
     st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
-    st.caption(f"Orange = new NCs opened per month. Green = NCs closed per month. Dashed line = monthly closure target ({monthly_tgt}/mo), derived from weekly target ({weekly_target}/wk) × 4.33 weeks/month. Green bars should consistently exceed both orange bars and the target line.")
+    st.caption(f"Orange = new NCs opened. Green = NCs closed. Dashed line = monthly target ({monthly_tgt}/mo) from weekly target ({weekly_target}/wk) × 4.33. Green bars should exceed both orange and the target line.")
 
     dl1, dl2, _ = st.columns([1, 1, 4])
     with dl1:
@@ -343,15 +357,15 @@ if tf < total_all:
 
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("NCs Open (WIP)", int(kpis["ncs_wip"] or 0),
-          help="All NCs with status OPEN in the filtered period. This is the active workload — each of these needs an owner driving it to closure.")
+          help="All NCs with status OPEN in the filtered period. Active workload for the quality team.")
 c2.metric("NCs Closed", int(kpis["ncs_closed"] or 0),
-          help="All NCs with status CLOSED in the filtered period. Includes both backlog closures and closures of newly opened NCs.")
+          help="All NCs with status CLOSED in the filtered period.")
 c3.metric("Major NCs Open", int(kpis["major_open"] or 0),
-          help="Open NCs classified as Major (classification field starts with 'Major'). These require NRB disposition review and carry higher risk. Prioritize for closure.")
+          help="Open NCs classified as Major. Require NRB disposition review and carry higher risk. Prioritize for closure.")
 c4.metric("Production NCs", int(kpis["production_open"] or 0),
-          help="Open NCs originating from internal production processes (notification type Z3). These are issues found during manufacturing, assembly, or testing at the Emmen site.")
+          help="Open NCs from internal production (Z3). Issues found during manufacturing, assembly, or testing.")
 c5.metric("Supplier NCs", int(kpis["supplier_open"] or 0),
-          help="Open NCs originating from supplier/procurement complaints (notification type Z2). These are incoming material or component issues requiring supplier follow-up.")
+          help="Open NCs from supplier/procurement complaints (Z2). Incoming material or component issues.")
 
 st.markdown("")
 
@@ -375,7 +389,7 @@ with col_a:
                           yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="")
         fig.update_traces(textposition="outside", hovertemplate="<b>%{y}</b><br>Open NCs: %{x}<extra></extra>")
         st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
-        st.caption("Projects with the most open NCs. '(no project)' = NCs missing a project assignment — these need data cleanup.")
+        st.caption("Projects with the most open NCs. '(no project)' = missing project assignment — needs data cleanup.")
         st.download_button("📥 Excel", to_excel_bytes(df_proj, "Projects_WIP"),
                            "projects_wip.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            key="dl_proj_wip")
@@ -393,7 +407,7 @@ with col_b:
                           yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="")
         fig.update_traces(textposition="outside", hovertemplate="<b>%{y}</b><br>NCs: %{x}<extra></extra>")
         st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
-        st.caption("Where NCs were detected. Red = missing detection area (data quality issue). Source: detection_area field from the NC tracker.")
+        st.caption("Where NCs were detected. Red = missing detection area (data quality issue).")
         st.download_button("📥 Excel", to_excel_bytes(df_area, "Detection_Area"),
                            "detection_area.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            key="dl_area")
@@ -414,7 +428,7 @@ with col_c:
         fig.update_traces(textposition="outside")
         fig.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0), legend_title="", xaxis_title="", yaxis_title="")
         st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
-        st.caption("Production = internal manufacturing NCs (Z3). Supplier = procurement complaints (Z2). Orange = still open, green = closed. Source: is_supplier_nc flag derived from notification type or supplier_name presence.")
+        st.caption("Production = internal manufacturing NCs (Z3). Supplier = procurement complaints (Z2). Orange = open, green = closed.")
         st.download_button("📥 Excel", to_excel_bytes(df_ps, "Prod_vs_Supplier"),
                            "prod_vs_supplier.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            key="dl_ps")
@@ -432,7 +446,7 @@ with col_d:
                      column_config={"owner": "Owner",
                                     "open_ncs": st.column_config.NumberColumn("Open"),
                                     "oldest_days": st.column_config.NumberColumn("Oldest (days)")})
-        st.caption("Open NCs per owner with the age of their oldest open NC. Owners with high 'Oldest' values may need support or escalation. Source: owner field from the NC tracker, days_open calculated from created_on to today.")
+        st.caption("Open NCs per owner with oldest NC age. High 'Oldest' values may need escalation.")
         st.download_button("📥 Excel", to_excel_bytes(df_own, "Owner_Workload"),
                            "owner_workload.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            key="dl_own")
@@ -445,7 +459,7 @@ fig = px.bar(df_yr, x="yr", y="n", color_discrete_sequence=["#1E2761"], text="n"
 fig.update_layout(height=240, margin=dict(l=0, r=0, t=10, b=0), showlegend=False, xaxis_title="", yaxis_title="")
 fig.update_traces(textposition="outside", hovertemplate="<b>%{x}</b><br>Total NCs: %{y}<extra></extra>")
 st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
-st.caption("Historical NC volume by year. Not affected by sidebar date filters — always shows the full dataset for trend context. Source: created_on year extracted from quality.db.")
+st.caption("Historical NC volume by year. Not affected by sidebar date filters — always shows full dataset for trend context.")
 dl1, dl2, _ = st.columns([1, 1, 4])
 with dl1:
     st.download_button("📥 Excel", to_excel_bytes(df_yr, "Yearly"),
@@ -464,7 +478,7 @@ st.subheader("Data Quality — rows needing cleaning")
 incomplete = _qf("""SELECT nc_id, owner, project, detection_area, classification, status
     FROM nc {WHERE} ORDER BY owner, nc_id""",
     extra=[("(project IS NULL OR detection_area IS NULL OR classification IS NULL OR owner IS NULL)", [])])
-st.caption(f"**{len(incomplete)} NCs** with at least one missing field (project, detection area, classification, or owner). Send this list to the responsible owners for cleanup.")
+st.caption(f"**{len(incomplete)} NCs** with at least one missing field. Send this list to owners for cleanup.")
 st.dataframe(incomplete, use_container_width=True, hide_index=True, height=300)
 
 dl1, dl2, _ = st.columns([1, 1, 4])
