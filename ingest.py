@@ -74,12 +74,46 @@ def clean_owner(val):
 
 
 def clean_project(val):
+    """Normalize raw project text to the canonical validation set.
+
+    Canonical: Ariane, Vega, MHI_H3, Relativity, SAS, Vulcan, Flexline.
+    Anything that doesn't map cleanly -> None (shown as '(no project)').
+    """
     if pd.isna(val):
         return None
     v = str(val).strip()
-    if not v or v.upper() in ("BLANK", "(BLANK)", "NOT ASSIGNED", "\xa0"):
+    if not v or v == '\xa0':
         return None
-    return v
+
+    up = v.upper()
+
+    # Explicit non-projects / placeholders -> no project
+    _blanks = ("BLANK", "(BLANK)", "NOT ASSIGNED", "TBD", "??", "?", "ALL",
+               "RETURN TO FLY", "N/A", "-")
+    if up in _blanks:
+        return None
+    if up.startswith("ADMIN") or up.startswith("PU-L") or up.startswith("TESTING") \
+       or up.startswith("SPACE ONE"):
+        return None
+
+    # Canonical keyword mapping (order matters: check specific before generic)
+    if "FLEXLINE" in up:
+        return "Flexline"
+    if up.startswith("MHI") or up == "H3" or "H3" in up.split():
+        return "MHI_H3"
+    if "RELATIVITY" in up or up.startswith("RS "):
+        return "Relativity"
+    if "VULCAN" in up or up.startswith("VCN"):
+        return "Vulcan"
+    if "SAS" in up or "KDS" in up:
+        return "SAS"
+    if "VEGA" in up:
+        return "Vega"
+    if "ARIANE" in up or up.startswith("A6"):
+        return "Ariane"
+
+    # Unrecognized -> no project (kept out of the clean charts)
+    return None
 
 
 def clean_text(val):
@@ -116,38 +150,49 @@ def load_tracker():
     # Drop blank/example rows
     df = df[df["System"].notna()].copy()
     df = df[df["System"].astype(str).str.strip() != '\xa0'].copy()
-    df = df[df["Title"].astype(str) != "NC_EXAMPLE"].copy()
+    # NC_EXAMPLE marker may live in the description column of the new schema
+    _title_col = "Title and Problem Description" if "Title and Problem Description" in df.columns else (
+        "Title" if "Title" in df.columns else None)
+    if _title_col:
+        df = df[df[_title_col].astype(str) != "NC_EXAMPLE"].copy()
 
-    # Column mapping
+    # Column mapping — updated for 2026-07 tracker schema
+    # (old schema names kept as fallbacks so older snapshots still load)
     col_map = {
         "System": "system",
-        "Title": "nc_id",
+        "ID-Blackout": "nc_id",            # was "Title"
+        "Title": "nc_id",                  # fallback for old snapshots
         "TC ID": "tc_id",
         "Migrated to EZ1": "migrated_to_ez1",
-        "Project + Flight Unit": "project",
-        "Plant ID": "plant_id",
+        "Project": "project",              # was "Project + Flight Unit"
+        "Project + Flight Unit": "project",# fallback
+        "Flight Unit": "flight_unit",      # new dedicated column
         "Detection": "detection_area",
-        "Description": "description",
+        "Title and Problem Description": "description",  # was "Description"
+        "Description": "description",      # fallback
         "Failure": "failure",
         "Material": "material",
         "Batch": "batch",
         "Issue Owner (QA/PA)": "owner",
+        "Issue Owner": "owner",            # fallback
         "Created On": "created_on",
         "NRB disposition": "nrb_disposition",
         "Disposition Implemented Date": "disposition_date",
         "Classification": "classification",
         "PSP ref.": "psp_ref",
         "NC WBS (EzyOne)": "nc_wbs",
-        "Notific. Status": "status",
+        "Status": "status",                # was "Notific. Status"
+        "Notific. Status": "status",       # fallback
         "Closure date": "closure_date",
-        "Purchasing Doc.": "purchasing_doc",
-        "PO item": "po_item",
-        "Vendor code": "vendor_code",
         "Supplier name": "supplier_name",
     }
     df = df.rename(columns=col_map)
-    # Keep only mapped columns (ignore extras)
-    keep = [c for c in col_map.values() if c in df.columns]
+    # Rename can create duplicate target names (old+new schema both mapped) —
+    # keep the first non-empty occurrence of each.
+    df = df.loc[:, ~df.columns.duplicated()].copy()
+    # Keep only mapped columns (ignore extras), unique + order-preserving
+    seen = set()
+    keep = [c for c in col_map.values() if c in df.columns and not (c in seen or seen.add(c))]
     df = df[keep].copy()
 
     # Clean
