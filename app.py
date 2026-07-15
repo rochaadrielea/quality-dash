@@ -188,30 +188,38 @@ with st.sidebar:
         fc1, fc2 = st.columns(2)
         with fc1:
             f_date_from = st.date_input("From", value=st.session_state["date_from"],
-                                        min_value=_pick_min, max_value=_pick_max)
+                                        min_value=_pick_min, max_value=_pick_max,
+                                        key="w_date_from")
         with fc2:
             f_date_to = st.date_input("To", value=st.session_state["date_to"],
-                                      min_value=_pick_min, max_value=_pick_max)
+                                      min_value=_pick_min, max_value=_pick_max,
+                                      key="w_date_to")
 
         f_since = st.date_input(
             "Since (burndown anchor)", value=st.session_state["since_date"],
             min_value=_pick_min, max_value=_pick_max,
+            key="w_since",
             help="The date the burndown measures FROM. It affects only the burndown KPI numbers "
                  "(Backlog at freeze, Closed since start, Still open, New since start, New still open). "
                  "All charts follow the From/To window instead. Must sit inside From/To.")
 
         f_nc_type = st.selectbox("NC type", ["All", "Production", "Supplier"],
-                                 index=["All", "Production", "Supplier"].index(st.session_state["nc_type"]))
+                                 index=["All", "Production", "Supplier"].index(st.session_state["nc_type"]),
+                                 key="w_nc_type")
         f_nc_status = st.selectbox("Status", ["All", "Open", "Closed"],
-                                   index=["All", "Open", "Closed"].index(st.session_state["nc_status"]))
+                                   index=["All", "Open", "Closed"].index(st.session_state["nc_status"]),
+                                   key="w_nc_status")
         f_nc_project = st.multiselect("Project", _projects,
-                                      default=[p for p in st.session_state["nc_project"] if p in _projects])
+                                      default=[p for p in st.session_state["nc_project"] if p in _projects],
+                                      key="w_nc_project")
         f_nc_owner = st.multiselect("Owner", _owners,
-                                    default=[o for o in st.session_state["nc_owner"] if o in _owners])
+                                    default=[o for o in st.session_state["nc_owner"] if o in _owners],
+                                    key="w_nc_owner")
         if _sources:
             f_nc_source = st.selectbox("Data source", ["All"] + _sources,
                                        index=(["All"] + _sources).index(st.session_state["nc_source"])
-                                       if st.session_state["nc_source"] in (["All"] + _sources) else 0)
+                                       if st.session_state["nc_source"] in (["All"] + _sources) else 0,
+                                       key="w_nc_source")
         else:
             f_nc_source = "All"
 
@@ -220,32 +228,60 @@ with st.sidebar:
         reset = c_reset.form_submit_button("Reset", use_container_width=True)
 
     if applied:
+        # Read the SUBMITTED widget values from their keys (authoritative on submit)
+        f_date_from = st.session_state["w_date_from"]
+        f_date_to = st.session_state["w_date_to"]
+        f_since = st.session_state["w_since"]
+        f_nc_type = st.session_state["w_nc_type"]
+        f_nc_status = st.session_state["w_nc_status"]
+        f_nc_project = st.session_state["w_nc_project"]
+        f_nc_owner = st.session_state["w_nc_owner"]
+        f_nc_source = st.session_state.get("w_nc_source", "All")
+
         if f_date_from > f_date_to:
             st.error(f"⚠️ 'From' ({f_date_from}) is after 'To' ({f_date_to}). "
                      "Pick a From date on or before the To date — filters not applied.")
-        elif f_since < f_date_from:
-            st.error(f"⚠️ 'Since' ({f_since}) is before 'From' ({f_date_from}). "
-                     "The Since anchor must sit inside the From/To window — filters not applied.")
-        elif f_since > f_date_to:
-            st.error(f"⚠️ 'Since' ({f_since}) is after 'To' ({f_date_to}). "
-                     "The Since anchor must sit inside the From/To window — filters not applied.")
         else:
+            # Keep 'Since' inside the From/To window — pull it along rather than
+            # rejecting the whole apply (Since must satisfy From <= Since <= To).
+            _since_adj = f_since
+            _since_moved = False
+            if _since_adj < f_date_from:
+                _since_adj = f_date_from
+                _since_moved = True
+            elif _since_adj > f_date_to:
+                _since_adj = f_date_to
+                _since_moved = True
+
             st.session_state["date_from"] = f_date_from
             st.session_state["date_to"] = f_date_to
-            st.session_state["since_date"] = f_since
+            st.session_state["since_date"] = _since_adj
             st.session_state["nc_type"] = f_nc_type
             st.session_state["nc_status"] = f_nc_status
             st.session_state["nc_project"] = f_nc_project
             st.session_state["nc_owner"] = f_nc_owner
             st.session_state["nc_source"] = f_nc_source
+            # Let the Since widget re-initialise from the (possibly adjusted) value
+            if _since_moved:
+                st.session_state.pop("w_since", None)
+                st.session_state["_since_notice"] = (
+                    f"'Since' moved to {_since_adj} to stay inside the From/To window.")
+            else:
+                st.session_state.pop("_since_notice", None)
             st.rerun()
 
     if reset:
         for _k, _v in _filter_defaults.items():
             st.session_state[_k] = _v
+        # Clear the form widget keys so they re-init from defaults
+        for _wk in ["w_date_from", "w_date_to", "w_since", "w_nc_type",
+                    "w_nc_status", "w_nc_project", "w_nc_owner", "w_nc_source"]:
+            st.session_state.pop(_wk, None)
         st.rerun()
 
     # Read committed filter values (used by build_where downstream)
+    if st.session_state.get("_since_notice"):
+        st.info("⚓ " + st.session_state["_since_notice"])
     date_from = st.session_state["date_from"]
     date_to = st.session_state["date_to"]
     # Safety: never let an inverted range reach the queries
