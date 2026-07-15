@@ -105,10 +105,61 @@ def _has_column(col_name):
         return False
 
 
-def to_excel_bytes(df, sheet_name="Data"):
+def _filter_context_rows(include_since=False):
+    """Context block describing when the report was taken and which filters were active.
+    Reads the committed filter values from session_state, so every export self-documents."""
+    ss = st.session_state
+    rows = [
+        ("Report generated", datetime.now().strftime("%d.%m.%Y %H:%M")),
+        ("Data source", DB_FILE),
+        ("Data last modified",
+         datetime.fromtimestamp(Path(DB_FILE).stat().st_mtime).strftime("%d.%m.%Y %H:%M")
+         if Path(DB_FILE).exists() else "n/a"),
+        ("Period From", str(ss.get("date_from", ""))),
+        ("Period To", str(ss.get("date_to", ""))),
+    ]
+    if include_since:
+        rows.append(("Since (burndown anchor)", str(ss.get("since_date", ""))))
+    rows += [
+        ("NC type", str(ss.get("nc_type", "All"))),
+        ("Status", str(ss.get("nc_status", "All"))),
+        ("Project", ", ".join(ss.get("nc_project", [])) or "All"),
+        ("Owner", ", ".join(ss.get("nc_owner", [])) or "All"),
+        ("Data source filter", str(ss.get("nc_source", "All"))),
+    ]
+    return pd.DataFrame(rows, columns=["Field", "Value"])
+
+
+def to_excel_bytes(df, sheet_name="Data", include_since=False):
+    """Export a dataframe with a filter-context header block above the data."""
+    buf = BytesIO()
+    ctx = _filter_context_rows(include_since=include_since)
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        # Context block at the top, data below it
+        ctx.to_excel(writer, sheet_name=sheet_name, index=False, startrow=0)
+        df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=len(ctx) + 2)
+        ws = writer.sheets[sheet_name]
+        for _c in ("A", "B", "C", "D", "E", "F"):
+            ws.column_dimensions[_c].width = 24
+    return buf.getvalue()
+
+
+def build_full_report_bytes(datasets, include_since=True):
+    """One workbook: a Filters/Context sheet + one sheet per chart dataset."""
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name=sheet_name, index=False)
+        _filter_context_rows(include_since=include_since).to_excel(
+            writer, sheet_name="Filters", index=False)
+        writer.sheets["Filters"].column_dimensions["A"].width = 26
+        writer.sheets["Filters"].column_dimensions["B"].width = 40
+        for name, d in datasets.items():
+            if d is None or (hasattr(d, "empty") and d.empty):
+                continue
+            sheet = name[:31]
+            d.to_excel(writer, sheet_name=sheet, index=False)
+            ws = writer.sheets[sheet]
+            for _c in ("A", "B", "C", "D", "E", "F"):
+                ws.column_dimensions[_c].width = 22
     return buf.getvalue()
 
 
@@ -530,7 +581,7 @@ with st.container(border=True):
 
         dl1, dl2, _ = st.columns([1, 1, 4])
         with dl1:
-            st.download_button("📥 Excel", to_excel_bytes(actual, "Burndown"),
+            st.download_button("📥 Excel", to_excel_bytes(actual, "Burndown", include_since=True),
                                "burndown_monthly.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 st.markdown("")
@@ -857,3 +908,39 @@ with dl1:
 
 st.caption(f"Data source: `quality.db` · Last modified: "
            f"{datetime.fromtimestamp(Path(DB_FILE).stat().st_mtime).strftime('%d.%m.%Y %H:%M')}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMPLETE REPORT — one workbook with every chart's data + the filter context
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown("---")
+with st.container(border=True):
+    st.markdown("### 📦 Complete report")
+    st.caption("One Excel workbook containing every chart's underlying data, plus a **Filters** "
+               "sheet recording when the report was taken and which filters were active "
+               "(From / To / Since / NC type / Status / Project / Owner / Data source). "
+               "All sheets reflect the filters currently applied.")
+
+    _report_sets = {}
+    for _name, _var in [
+        ("Burndown_OpenPerMonth", "actual"),
+        ("Monthly_Opens_vs_Closes", "df_mo"),
+        ("Opened_vs_Closed_Trend", "df_trend"),
+        ("Top_Projects_WIP", "df_proj"),
+        ("Detection_Area", "df_area"),
+        ("Production_vs_Supplier", "df_ps"),
+        ("Owner_Workload", "df_own"),
+        ("NC_Total_per_Year", "df_yr"),
+        ("Data_Quality", "incomplete"),
+    ]:
+        _d = globals().get(_var)
+        if _d is not None:
+            _report_sets[_name] = _d
+
+    st.download_button(
+        "📥 Download complete report (.xlsx)",
+        build_full_report_bytes(_report_sets, include_since=True),
+        f"BRM_Quality_Report_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_full_report", type="primary")
+    st.caption(f"Includes {len(_report_sets)} data sheets + Filters context sheet.")
