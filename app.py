@@ -56,6 +56,13 @@ st.markdown("""
         border-radius: 12px;
         padding: 0.5rem 0.75rem;
     }
+    /* Month picker section box */
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(div.month-anchor) {
+        background: #FFF6EC;
+        border: 2px solid #F26E21 !important;
+        border-radius: 12px;
+        padding: 0.5rem 0.75rem;
+    }
     /* KPI cards with visible descriptions */
     .kpi-card {
         padding: 0.4rem 0.2rem 0.9rem 0;
@@ -138,7 +145,7 @@ with st.sidebar:
     st.markdown("### 🔍 Filters")
     month_label = st.text_input("Reporting month", value=datetime.now().strftime("%B %Y"))
 
-    # Earliest NC in the data — used to bound all date pickers.
+    # Earliest NC in the data — used as the lower bound of the date pickers.
     _min_row = _q("SELECT MIN(created_on) AS m FROM nc WHERE created_on IS NOT NULL")
     _earliest = None
     if not _min_row.empty and _min_row.iloc[0]["m"]:
@@ -146,12 +153,13 @@ with st.sidebar:
             _earliest = pd.to_datetime(_min_row.iloc[0]["m"]).date()
         except Exception:
             _earliest = None
-    _default_from = _earliest or date(2015, 1, 1)
-    _pick_min = _default_from
+    _pick_min = _earliest or date(2015, 1, 1)
     _pick_max = date(date.today().year + 2, 12, 31)
+    # Default view starts in 2023 — older data exists and is still selectable,
+    # but loading a decade of history makes the charts noisy.
+    _default_from = max(_pick_min, date(2023, 1, 1))
 
     # ---- Defaults for the general filters (committed values live in session_state) ----
-    # From defaults to the earliest NC in the data, so the full story shows by default.
     _filter_defaults = {
         "date_from": _default_from,
         "date_to": date.today(),
@@ -188,7 +196,9 @@ with st.sidebar:
         f_since = st.date_input(
             "Since (burndown anchor)", value=st.session_state["since_date"],
             min_value=_pick_min, max_value=_pick_max,
-            help="The baseline the burndown measures from — 'since when'. Must sit inside the From/To window.")
+            help="The date the burndown measures FROM. It affects only the burndown KPI numbers "
+                 "(Backlog at freeze, Closed since start, Still open, New since start, New still open). "
+                 "All charts follow the From/To window instead. Must sit inside From/To.")
 
         f_nc_type = st.selectbox("NC type", ["All", "Production", "Supplier"],
                                  index=["All", "Production", "Supplier"].index(st.session_state["nc_type"]))
@@ -299,6 +309,10 @@ def _qf(tmpl, extra=None, date_col="created_on", use_date=True):
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown('<div id="burndown"></div>', unsafe_allow_html=True)
 st.subheader(f"NC Burndown Tracker · since {exercise_start.strftime('%d %B %Y')}")
+st.caption(f"⚓ **Since {exercise_start.strftime('%d %b %Y')}** = the date the burndown measures from. "
+           f"It drives **only the KPI numbers below** (Backlog at freeze, Closed since start, Still open, "
+           f"New since start, New still open). Every chart follows the **From/To** window "
+           f"(**{date_from}** → **{date_to}**).")
 
 es = str(exercise_start)
 
@@ -421,7 +435,7 @@ with st.container(border=True):
     # ══════════════════════════════════════════════════════════════════════════
     # Build the shared monthly series once (used by all three charts below)
     # ══════════════════════════════════════════════════════════════════════════
-    _hist_months = pd.date_range(exercise_start.replace(day=1), today, freq="ME")
+    _hist_months = pd.date_range(date_from.replace(day=1), min(date_to, today), freq="ME")
     _flt = (" AND " + " AND ".join(_BF_CL)) if _BF_CL else ""
     _rows = []
     for _m in _hist_months:
@@ -434,16 +448,18 @@ with st.container(border=True):
     # opened & closed per month (in / out flow) — filter-aware
     flow = _q(f"""
         WITH o AS (SELECT substr(created_on,1,7) AS month, COUNT(*) AS opened
-                   FROM nc WHERE created_on >= ?{_flt} GROUP BY month),
+                   FROM nc WHERE created_on IS NOT NULL{_flt} GROUP BY month),
              c AS (SELECT substr(closure_date,1,7) AS month, COUNT(*) AS closed
-                   FROM nc WHERE closure_date >= ?{_flt} GROUP BY month)
+                   FROM nc WHERE closure_date IS NOT NULL{_flt} GROUP BY month)
         SELECT COALESCE(o.month,c.month) AS month,
                COALESCE(o.opened,0) AS opened, COALESCE(c.closed,0) AS closed
-        FROM o LEFT JOIN c ON o.month=c.month ORDER BY month
-    """, [es] + _BF_PR + [es] + _BF_PR)
+        FROM o LEFT JOIN c ON o.month=c.month
+        WHERE COALESCE(o.month,c.month) IS NOT NULL
+        ORDER BY month
+    """, _BF_PR + _BF_PR)
 
     if actual.empty:
-        st.info("No data since the exercise start date.")
+        st.info("No data in the selected From/To range.")
     else:
         # anchor last actual point to live open-now
         actual.loc[actual.index[-1], "open"] = int(open_now_input)
@@ -460,6 +476,7 @@ with st.container(border=True):
         # CHART 1 — DATA ANALYSIS: Open NCs per month (+ opened vs closed flow)
         # ──────────────────────────────────────────────────────────────────────
         st.markdown("**Open NCs per month** — what actually happened")
+        st.caption(f"📅 Showing **{date_from}** → **{date_to}**")
         fig1 = go.Figure()
         fig1.add_trace(go.Bar(x=flow["month"], y=flow["opened"], name="Opened", marker_color="#F26E21",
                               hovertemplate="<b>%{x}</b><br>Opened: %{y}<extra></extra>"))
@@ -487,35 +504,58 @@ st.markdown("")
 # CURRENT MONTH
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown('<div id="monthly"></div>', unsafe_allow_html=True)
-cm = datetime.now().strftime("%Y-%m")
-cm_label = datetime.now().strftime("%B %Y")
-st.subheader(f"Current Month — {cm_label}")
 
 # Current Month obeys the full filter (dates + project/owner/type/status/source)
 _cm_cl, _cm_pr = _bd_filter(include_dates=True)
 _cm_flt = (" AND " + " AND ".join(_cm_cl)) if _cm_cl else ""
-cm_opened = _q("SELECT COUNT(*) AS n FROM nc WHERE substr(created_on,1,7)=?" + _cm_flt, [cm] + _cm_pr).iloc[0]["n"]
-cm_closed = _q("SELECT COUNT(*) AS n FROM nc WHERE substr(closure_date,1,7)=?" + _cm_flt, [cm] + _cm_pr).iloc[0]["n"]
 
-m1, m2, m3 = st.columns(3)
-m1.metric("Opened this month", int(cm_opened),
-          help=f"NCs with created_on in {cm_label}. New quality issues entering the queue.")
-m2.metric("Closed this month", int(cm_closed),
-          help=f"NCs with closure_date in {cm_label}. The team's closure output.")
-m3.metric("Net (closed − opened)", int(cm_closed - cm_opened),
-          delta_color="normal" if cm_closed >= cm_opened else "inverse",
-          help="Closed minus opened. Positive = backlog shrinking. Negative = backlog growing. Target: always positive.")
+st.markdown('<div class="month-anchor"></div>', unsafe_allow_html=True)
+with st.container(border=True):
+    # Months available inside the active From/To window (newest first)
+    _months_df = _q(
+        "SELECT DISTINCT substr(created_on,1,7) AS m FROM nc WHERE created_on IS NOT NULL"
+        + _cm_flt + " ORDER BY m DESC", _cm_pr)
+    _month_opts = [m for m in _months_df["m"].tolist() if m]
+    _this_month = datetime.now().strftime("%Y-%m")
+    if _this_month not in _month_opts:
+        _month_opts = [_this_month] + _month_opts
+    _default_idx = _month_opts.index(_this_month) if _this_month in _month_opts else 0
+
+    hcol, scol = st.columns([2, 1])
+    with scol:
+        cm = st.selectbox("Month", _month_opts, index=_default_idx, key="month_pick",
+                          help="Pick any month inside the From/To window. Defaults to the current month.")
+    cm_label = datetime.strptime(cm, "%Y-%m").strftime("%B %Y")
+    with hcol:
+        _is_current = (cm == _this_month)
+        st.subheader(("Current Month — " if _is_current else "Month — ") + cm_label)
+
+    cm_opened = _q("SELECT COUNT(*) AS n FROM nc WHERE substr(created_on,1,7)=?" + _cm_flt, [cm] + _cm_pr).iloc[0]["n"]
+    cm_closed = _q("SELECT COUNT(*) AS n FROM nc WHERE substr(closure_date,1,7)=?" + _cm_flt, [cm] + _cm_pr).iloc[0]["n"]
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Opened", int(cm_opened),
+              help=f"NCs created in {cm_label}. New quality issues entering the queue.")
+    m2.metric("Closed", int(cm_closed),
+              help=f"NCs closed in {cm_label}. The team's closure output.")
+    m3.metric("Net (closed − opened)", int(cm_closed - cm_opened),
+              delta_color="normal" if cm_closed >= cm_opened else "inverse",
+              help="Closed minus opened. Positive = backlog shrinking. Negative = backlog growing.")
 
 st.markdown("**Monthly opens vs closes**")
+st.caption(f"📅 Showing **{date_from}** → **{date_to}**")
 _mo_flt = (" AND " + " AND ".join(_cm_cl)) if _cm_cl else ""
 df_mo = _q(f"""
     WITH o AS (SELECT substr(created_on,1,7) AS month, COUNT(*) AS opened
-               FROM nc WHERE created_on >= ?{_mo_flt} GROUP BY month),
+               FROM nc WHERE created_on IS NOT NULL{_mo_flt} GROUP BY month),
          c AS (SELECT substr(closure_date,1,7) AS month, COUNT(*) AS closed
-               FROM nc WHERE closure_date >= ?{_mo_flt} GROUP BY month)
-    SELECT o.month, COALESCE(o.opened,0) AS opened, COALESCE(c.closed,0) AS closed
-    FROM o LEFT JOIN c ON o.month=c.month ORDER BY o.month
-""", [es] + _cm_pr + [es] + _cm_pr)
+               FROM nc WHERE closure_date IS NOT NULL{_mo_flt} GROUP BY month)
+    SELECT COALESCE(o.month,c.month) AS month,
+           COALESCE(o.opened,0) AS opened, COALESCE(c.closed,0) AS closed
+    FROM o LEFT JOIN c ON o.month=c.month
+    WHERE COALESCE(o.month,c.month) IS NOT NULL
+    ORDER BY month
+""", _cm_pr + _cm_pr)
 
 if not df_mo.empty:
     fig = go.Figure()
@@ -535,6 +575,7 @@ if not df_mo.empty:
                            key="dl_monthly")
 
 st.markdown("**Opened vs Closed — monthly trend**")
+st.caption(f"📅 Showing **{date_from}** → **{date_to}**")
 df_trend = _q(f"""
     WITH o AS (SELECT substr(created_on,1,7) AS month, COUNT(*) AS opened
                FROM nc WHERE created_on IS NOT NULL{_mo_flt} GROUP BY month),
@@ -615,6 +656,7 @@ col_a, col_b = st.columns(2)
 
 with col_a:
     st.markdown("**Top 6 Projects — NCs WIP**")
+    st.caption(f"📅 {date_from} → {date_to}")
     df_proj = _qf("SELECT COALESCE(project,'(no project)') AS project, COUNT(*) AS open_ncs FROM nc {WHERE} GROUP BY project ORDER BY open_ncs DESC LIMIT 6",
                    extra=[("is_open=1", [])])
     if not df_proj.empty:
@@ -663,6 +705,7 @@ with col_a:
 
 with col_b:
     st.markdown("**NCs by Detection Area**")
+    st.caption(f"📅 {date_from} → {date_to}")
     df_area = _qf("SELECT COALESCE(detection_area,'BLANK - to clean') AS area, COUNT(*) AS n FROM nc {WHERE} GROUP BY area ORDER BY n DESC LIMIT 12")
     if not df_area.empty:
         colors = ["#E53E3E" if a.startswith("BLANK") else "#F26E21" for a in df_area["area"]]
@@ -683,6 +726,7 @@ col_c, col_d = st.columns(2)
 
 with col_c:
     st.markdown("**Production vs Supplier**")
+    st.caption(f"📅 {date_from} → {date_to}")
     df_ps = _qf("""SELECT CASE WHEN is_supplier_nc=1 THEN 'Supplier' ELSE 'Production' END AS source,
                 SUM(CASE WHEN is_open=1 THEN 1 ELSE 0 END) AS open_ncs,
                 SUM(CASE WHEN is_open=0 THEN 1 ELSE 0 END) AS closed_ncs
@@ -719,6 +763,7 @@ with col_c:
 
 with col_d:
     st.markdown("**Open NCs by Owner** (Top 10)")
+    st.caption(f"📅 {date_from} → {date_to}")
     df_own = _qf("""SELECT COALESCE(owner,'(no owner)') AS owner,
                 SUM(CASE WHEN is_open=1 THEN 1 ELSE 0 END) AS open_ncs,
                 MAX(days_open) AS oldest_days
