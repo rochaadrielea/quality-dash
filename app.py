@@ -138,14 +138,7 @@ with st.sidebar:
     st.markdown("### 🔍 Filters")
     month_label = st.text_input("Reporting month", value=datetime.now().strftime("%B %Y"))
 
-    # Exercise start / deadline stay OUTSIDE the form — the burndown section has
-    # its own live deadline slider, and these feed it directly.
-    exercise_start = st.date_input(
-        "Exercise start date", value=date(2025, 6, 1),
-        help="The date when the NC closure exercise was defined. All burndown metrics use this as the baseline.")
-
-    # ---- Defaults for the general filters (committed values live in session_state) ----
-    # From defaults to the earliest NC in the data, so the full story shows by default.
+    # Earliest NC in the data — used to bound all date pickers.
     _min_row = _q("SELECT MIN(created_on) AS m FROM nc WHERE created_on IS NOT NULL")
     _earliest = None
     if not _min_row.empty and _min_row.iloc[0]["m"]:
@@ -154,10 +147,15 @@ with st.sidebar:
         except Exception:
             _earliest = None
     _default_from = _earliest or date(2015, 1, 1)
+    _pick_min = _default_from
+    _pick_max = date(date.today().year + 2, 12, 31)
 
+    # ---- Defaults for the general filters (committed values live in session_state) ----
+    # From defaults to the earliest NC in the data, so the full story shows by default.
     _filter_defaults = {
         "date_from": _default_from,
         "date_to": date.today(),
+        "since_date": date(2025, 6, 1),
         "nc_type": "All",
         "nc_status": "All",
         "nc_project": [],
@@ -177,11 +175,20 @@ with st.sidebar:
     # ---- General period filter: only applies when the button is clicked ----
     with st.form("general_filters", clear_on_submit=False):
         st.markdown("**Period filter** (dashboard + trends)")
+        # Explicit bounds (_pick_min/_pick_max set above): without these, Streamlit only
+        # offers ~10 years around the current value, which hid 2025/2026.
         fc1, fc2 = st.columns(2)
         with fc1:
-            f_date_from = st.date_input("From", value=st.session_state["date_from"])
+            f_date_from = st.date_input("From", value=st.session_state["date_from"],
+                                        min_value=_pick_min, max_value=_pick_max)
         with fc2:
-            f_date_to = st.date_input("To", value=st.session_state["date_to"])
+            f_date_to = st.date_input("To", value=st.session_state["date_to"],
+                                      min_value=_pick_min, max_value=_pick_max)
+
+        f_since = st.date_input(
+            "Since (burndown anchor)", value=st.session_state["since_date"],
+            min_value=_pick_min, max_value=_pick_max,
+            help="The baseline the burndown measures from — 'since when'. Must sit inside the From/To window.")
 
         f_nc_type = st.selectbox("NC type", ["All", "Production", "Supplier"],
                                  index=["All", "Production", "Supplier"].index(st.session_state["nc_type"]))
@@ -203,14 +210,25 @@ with st.sidebar:
         reset = c_reset.form_submit_button("Reset", use_container_width=True)
 
     if applied:
-        st.session_state["date_from"] = f_date_from
-        st.session_state["date_to"] = f_date_to
-        st.session_state["nc_type"] = f_nc_type
-        st.session_state["nc_status"] = f_nc_status
-        st.session_state["nc_project"] = f_nc_project
-        st.session_state["nc_owner"] = f_nc_owner
-        st.session_state["nc_source"] = f_nc_source
-        st.rerun()
+        if f_date_from > f_date_to:
+            st.error(f"⚠️ 'From' ({f_date_from}) is after 'To' ({f_date_to}). "
+                     "Pick a From date on or before the To date — filters not applied.")
+        elif f_since < f_date_from:
+            st.error(f"⚠️ 'Since' ({f_since}) is before 'From' ({f_date_from}). "
+                     "The Since anchor must sit inside the From/To window — filters not applied.")
+        elif f_since > f_date_to:
+            st.error(f"⚠️ 'Since' ({f_since}) is after 'To' ({f_date_to}). "
+                     "The Since anchor must sit inside the From/To window — filters not applied.")
+        else:
+            st.session_state["date_from"] = f_date_from
+            st.session_state["date_to"] = f_date_to
+            st.session_state["since_date"] = f_since
+            st.session_state["nc_type"] = f_nc_type
+            st.session_state["nc_status"] = f_nc_status
+            st.session_state["nc_project"] = f_nc_project
+            st.session_state["nc_owner"] = f_nc_owner
+            st.session_state["nc_source"] = f_nc_source
+            st.rerun()
 
     if reset:
         for _k, _v in _filter_defaults.items():
@@ -220,6 +238,12 @@ with st.sidebar:
     # Read committed filter values (used by build_where downstream)
     date_from = st.session_state["date_from"]
     date_to = st.session_state["date_to"]
+    # Safety: never let an inverted range reach the queries
+    if date_from > date_to:
+        date_from, date_to = date_to, date_from
+    # 'Since' anchors the burndown; keep it inside the From/To window
+    exercise_start = st.session_state["since_date"]
+    exercise_start = max(date_from, min(exercise_start, date_to))
     nc_type = st.session_state["nc_type"]
     nc_status = st.session_state["nc_status"]
     nc_project = st.session_state["nc_project"]
@@ -467,8 +491,8 @@ cm = datetime.now().strftime("%Y-%m")
 cm_label = datetime.now().strftime("%B %Y")
 st.subheader(f"Current Month — {cm_label}")
 
-# Current Month respects Project/Owner/type/status/source (dates are inherently the current month here)
-_cm_cl, _cm_pr = _bd_filter(include_dates=False)
+# Current Month obeys the full filter (dates + project/owner/type/status/source)
+_cm_cl, _cm_pr = _bd_filter(include_dates=True)
 _cm_flt = (" AND " + " AND ".join(_cm_cl)) if _cm_cl else ""
 cm_opened = _q("SELECT COUNT(*) AS n FROM nc WHERE substr(created_on,1,7)=?" + _cm_flt, [cm] + _cm_pr).iloc[0]["n"]
 cm_closed = _q("SELECT COUNT(*) AS n FROM nc WHERE substr(closure_date,1,7)=?" + _cm_flt, [cm] + _cm_pr).iloc[0]["n"]
