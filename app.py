@@ -720,15 +720,18 @@ if tf < total_all:
 
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("NCs Open (WIP)", int(kpis["ncs_wip"] or 0),
-          help="All NCs with status OPEN in the filtered period. Active workload for the quality team.")
+          help="OPEN NCs in the filtered period. Active workload. Note: open NCs are mostly recent, "
+               "so widening the date range adds few — old NCs are usually already closed.")
 c2.metric("NCs Closed", int(kpis["ncs_closed"] or 0),
-          help="All NCs with status CLOSED in the filtered period.")
+          help="CLOSED NCs in the filtered period. This grows a lot when you widen the date range.")
 c3.metric("Major NCs Open", int(kpis["major_open"] or 0),
-          help="Open NCs classified as Major. Require NRB disposition review and carry higher risk. Prioritize for closure.")
-c4.metric("Production NCs", int(kpis["production_open"] or 0),
-          help="Open NCs from internal production (Z3). Issues found during manufacturing, assembly, or testing.")
-c5.metric("Supplier NCs", int(kpis["supplier_open"] or 0),
-          help="Open NCs from supplier/procurement complaints (Z2). Incoming material or component issues.")
+          help="OPEN NCs classified as Major. Require NRB disposition review and carry higher risk.")
+c4.metric("Production NCs — open", int(kpis["production_open"] or 0),
+          help="OPEN NCs from internal production (Z3). Issues found during manufacturing, assembly, or testing.")
+c5.metric("Supplier NCs — open", int(kpis["supplier_open"] or 0),
+          help="OPEN NCs from supplier/procurement complaints (Z2). Incoming material or component issues.")
+st.caption("ℹ️ **Open** = currently unresolved (WIP). **Closed** = resolved. Open counts change little "
+           "when you widen the dates because old NCs are mostly closed; closed counts change a lot.")
 
 st.markdown("")
 
@@ -742,7 +745,7 @@ st.subheader("Trends & Breakdown")
 col_a, col_b = st.columns(2)
 
 with col_a:
-    st.markdown("**Top 6 Projects — NCs WIP**")
+    st.markdown("**Top 6 Projects — NCs WIP** · :grey[open only]")
     st.caption(f"📅 {date_from} → {date_to}")
     df_proj = _qf("SELECT COALESCE(project,'(no project)') AS project, COUNT(*) AS open_ncs FROM nc {WHERE} GROUP BY project ORDER BY open_ncs DESC LIMIT 6",
                    extra=[("is_open=1", [])])
@@ -753,7 +756,9 @@ with col_a:
                           yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="")
         fig.update_traces(textposition="outside", hovertemplate="<b>%{y}</b><br>Open NCs: %{x}<extra></extra>")
         st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
-        st.caption("Projects with the most open NCs. '(no project)' = missing project assignment — needs data cleanup.")
+        st.caption("**Counts OPEN NCs only** (WIP = current workload). Closed NCs are excluded, so widening "
+                   "the date range adds little here — old NCs are mostly closed already. "
+                   "'(no project)' = missing project assignment, needs data cleanup.")
         st.download_button("📥 Excel", to_excel_bytes(df_proj, "Projects_WIP"),
                            "projects_wip.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            key="dl_proj_wip")
@@ -791,7 +796,7 @@ with col_a:
         st.info("No open NCs in range.")
 
 with col_b:
-    st.markdown("**NCs by Detection Area**")
+    st.markdown("**NCs by Detection Area** · :grey[all NCs: open + closed]")
     st.caption(f"📅 {date_from} → {date_to}")
     df_area = _qf("SELECT COALESCE(detection_area,'BLANK - to clean') AS area, COUNT(*) AS n FROM nc {WHERE} GROUP BY area ORDER BY n DESC LIMIT 12")
     if not df_area.empty:
@@ -802,7 +807,9 @@ with col_b:
                           yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="")
         fig.update_traces(textposition="outside", hovertemplate="<b>%{y}</b><br>NCs: %{x}<extra></extra>")
         st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
-        st.caption("Where NCs were detected. Red = missing detection area (data quality issue).")
+        st.caption("**Counts ALL NCs — open and closed** (where each NC was first detected). "
+                   "Because it includes closed NCs, this chart moves a lot when you widen the date range. "
+                   "Red = missing detection area (data quality issue).")
         st.download_button("📥 Excel", to_excel_bytes(df_area, "Detection_Area"),
                            "detection_area.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            key="dl_area")
@@ -812,7 +819,7 @@ with col_b:
 col_c, col_d = st.columns(2)
 
 with col_c:
-    st.markdown("**Production vs Supplier**")
+    st.markdown("**Production vs Supplier** · :grey[open only (closed in tooltips)]")
     st.caption(f"📅 {date_from} → {date_to}")
     df_ps = _qf("""SELECT CASE WHEN is_supplier_nc=1 THEN 'Supplier' ELSE 'Production' END AS source,
                 SUM(CASE WHEN is_open=1 THEN 1 ELSE 0 END) AS open_ncs,
@@ -849,7 +856,7 @@ with col_c:
                        key="dl_ps")
 
 with col_d:
-    st.markdown("**Open NCs by Owner** (Top 10)")
+    st.markdown("**Open NCs by Owner** (Top 10) · :grey[open only]")
     st.caption(f"📅 {date_from} → {date_to}")
     df_own = _qf("""SELECT COALESCE(owner,'(no owner)') AS owner,
                 SUM(CASE WHEN is_open=1 THEN 1 ELSE 0 END) AS open_ncs,
