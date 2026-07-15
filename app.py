@@ -479,14 +479,14 @@ for _row, _ncols in [(_kpis_row1, 4), (_kpis_row2, 3)]:
 # ──────────────────────────────────────────────────────────────────────────
 st.markdown('<div class="reach-zero-anchor"></div>', unsafe_allow_html=True)
 with st.container(border=True):
-    st.markdown("##### 🎯 Closure rate to reach zero open")
-    sc1, sc2, sc3 = st.columns([2, 1, 1])
+    st.markdown("##### 🎯 Closure rate to reach target")
+    sc1, sc2, sc3, sc4 = st.columns([2, 1, 1, 1])
     with sc1:
         target_deadline = st.slider(
             "Deadline", min_value=today,
             max_value=date(today.year + 2, 12, 31),
             value=date(2026, 9, 30), format="DD MMM YYYY",
-            help="Drag to change the target date. The per-week / per-month numbers and the chart's target line update live.")
+            help="Drag to change the target date. The per-week / per-month numbers update live.")
     with sc2:
         inflow = st.number_input(
             "New / week (inflow)", min_value=0.0, value=float(avg_new_wk), step=0.1,
@@ -497,23 +497,46 @@ with st.container(border=True):
             "Open now", min_value=0, value=int(total_open), step=1,
             key=f"opennow_{_filter_sig}",
             help="Current open NC count for this selection. Editable to test scenarios.")
+    with sc4:
+        target_open = st.number_input(
+            "Target open", min_value=0, value=65, step=1,
+            key="target_open",
+            help="The acceptable number of open NCs to get down to by the deadline (not necessarily zero). "
+                 "Change it here if the goal changes.")
 
     weeks_left = max(1, (target_deadline - today).days / 7)
-    # Option B: clear all open + absorb ongoing inflow  ->  open/weeks + inflow
-    required_per_week = open_now_input / weeks_left + inflow
+    # Close the gap down to the target AND absorb ongoing inflow:
+    #   (open - target) / weeks + inflow
+    _gap = open_now_input - target_open
+    _at_target = _gap <= 0
+    required_per_week = (max(0, _gap) / weeks_left) + inflow
     required_per_month = required_per_week * 4.33
-    weekly_target = math.ceil(required_per_week)          # kept for downstream monthly-trend target line
+    weekly_target = math.ceil(required_per_week)          # kept for downstream use
     breakeven = math.ceil(inflow)
 
     zc1, zc2, zc3 = st.columns(3)
-    zc1.metric(f"Close / week → 0 by {target_deadline.strftime('%d %b %Y')}",
-               f"{math.ceil(required_per_week)} NCs",
-               help=f"{open_now_input} open ÷ {weeks_left:.0f} weeks + {inflow:.1f}/wk inflow. "
-                    f"With {team_size} people ≈ {max(1, round(required_per_week/team_size,1))} NC/person/week.")
+    if _at_target:
+        zc1.metric(f"Close / week → {target_open} by {target_deadline.strftime('%d %b %Y')}",
+                   f"{breakeven} NCs",
+                   help=f"Already at or below the target ({open_now_input} open ≤ {target_open}). "
+                        f"Closing {breakeven}/week just matches inflow and holds the line.")
+    else:
+        zc1.metric(f"Close / week → {target_open} by {target_deadline.strftime('%d %b %Y')}",
+                   f"{math.ceil(required_per_week)} NCs",
+                   help=f"({open_now_input} open − {target_open} target) ÷ {weeks_left:.0f} weeks "
+                        f"+ {inflow:.1f}/wk inflow. With {team_size} people ≈ "
+                        f"{max(1, round(required_per_week/team_size,1))} NC/person/week.")
     zc2.metric("Close / month", f"{math.ceil(required_per_month)} NCs",
                help="Weekly required × 4.33 weeks per month.")
     zc3.metric("Break-even (hold the line)", f"{breakeven} NCs/wk",
                help="Closing only this many just matches inflow — open count stays flat. Below this, it grows.")
+
+    if _at_target:
+        st.success(f"✅ Already at target — {open_now_input} open is at or below the target of {target_open}. "
+                   f"Keep closing ~{breakeven}/week to hold it.")
+    else:
+        st.caption(f"Need to clear **{_gap}** NCs ({open_now_input} open → {target_open} target) "
+                   f"in **{weeks_left:.0f}** weeks, while ~{inflow:.1f} new NCs arrive each week.")
 
     progress = closed_from_backlog / max(1, backlog_at_start)
     st.progress(min(progress, 1.0), text=f"Backlog closure: {int(closed_from_backlog)} / {int(backlog_at_start)} ({progress:.0%})")
