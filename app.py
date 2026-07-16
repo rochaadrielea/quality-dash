@@ -1009,12 +1009,33 @@ if HAS_CAPA_TYPE:
     else:
         st.markdown('<div class="coverage-anchor"></div>', unsafe_allow_html=True)
         with st.container(border=True):
+            # Explain the toggle with this selection's own live numbers rather than
+            # in the abstract — "43% of 1,248" lands where "the denominator is the
+            # filtered population" does not.
+            def _pct_of(n, d):
+                return f"{(100 * n / d):.0f}%" if d else "—"
+
+            _rca_all_n = int(_cov["rca_all"] or 0)
+            _rca_open_n = int(_cov["rca_open"] or 0)
+            _rca_closed_n = int(_cov["rca_closed"] or 0)
+
+            _help = (
+                f"Using RCA as the example:\n\n"
+                f"• **All NCs** → {_n_total:,} NCs. "
+                f"{_pct_of(_rca_all_n, _n_total)} have an RCA.\n\n"
+                f"• **Open only** → looks at the {_n_open:,} open ones. Asks: what % of "
+                f"those {_n_open:,} have an RCA? ({_pct_of(_rca_open_n, _n_open)})\n\n"
+                f"• **Closed only** → looks at the {_n_closed:,} closed ones. Same question, "
+                f"that group. ({_pct_of(_rca_closed_n, _n_closed)})\n\n"
+                f"• **Side by side** → open and closed on one chart.\n\n"
+                f"{_n_open:,} + {_n_closed:,} = {_n_total:,}. Open and Closed are the two halves "
+                f"of the same total — they split it, they don't change it. An NC that never "
+                f"appears in the CAPA tracker counts as not covered."
+            )
+
             view = st.radio(
                 "View", ["All NCs", "Open only", "Closed only", "Side by side"],
-                horizontal=True, key="cov_view",
-                help="The denominator is always every NC matching the sidebar filters — an NC with no "
-                     "CAPA row at all is counted as not covered. Open/Closed split the same total; they "
-                     "do not change it.")
+                horizontal=True, key="cov_view", help=_help)
 
             _suffix = {"All NCs": "all", "Open only": "open", "Closed only": "closed"}
             _denoms = {"all": _n_total, "open": _n_open, "closed": _n_closed}
