@@ -961,6 +961,7 @@ st.markdown("")
 # ══════════════════════════════════════════════════════════════════════════════
 df_cov = None
 df_combo = None
+df_ncdetail = None
 if HAS_CAPA_TYPE:
     st.markdown('<div id="capa-coverage"></div>', unsafe_allow_html=True)
     st.subheader("CAPA Coverage")
@@ -1039,6 +1040,8 @@ if HAS_CAPA_TYPE:
 
             _suffix = {"All NCs": "all", "Open only": "open", "Closed only": "closed"}
             _denoms = {"all": _n_total, "open": _n_open, "closed": _n_closed}
+            # Which bar the user clicked, if any. Drives the detail table below.
+            _bar_pick = None
 
             def _cov_row(key):
                 """(label, count, denominator) for each CAPA type in one view."""
@@ -1091,10 +1094,18 @@ if HAS_CAPA_TYPE:
                                    legend=dict(orientation="h", y=-0.15),
                                    xaxis_title="", yaxis_title="% of NCs",
                                    yaxis=dict(range=[0, 105]))
-                st.plotly_chart(figc, use_container_width=True, config=CHART_CONFIG, key="cov_side")
+                _sel_s = st.plotly_chart(figc, use_container_width=True, config=CHART_CONFIG,
+                                         key="cov_side", on_select="rerun",
+                                         selection_mode="points")
+                _pts_s = (_sel_s or {}).get("selection", {}).get("points", [])
+                if _pts_s:
+                    _bar_pick = _pts_s[0].get("x")
                 st.caption("Each bar is a % of its **own** group (open, or closed) — the two groups have "
-                           "different denominators, so compare the shape, not the height. A newly opened NC "
-                           "has had no time to get an RCA yet, which is why open sits lower than closed.")
+                           "different denominators, so compare the shape, not the height. If closed NCs "
+                           "score no better than open ones, that is worth a look: a closed NC with no RCA "
+                           "was closed without the cause being written down. "
+                           "**Click a bar** to list those NCs below (open and closed together — use the "
+                           "Open only / Closed only views to separate them).")
                 st.dataframe(df_cov, use_container_width=True, hide_index=True)
 
             else:
@@ -1129,10 +1140,19 @@ if HAS_CAPA_TYPE:
                                        showlegend=False, xaxis_title="", yaxis_title="% of NCs",
                                        yaxis=dict(range=[0, 105]))
                     figc.update_traces(textposition="outside",
-                                       hovertemplate="<b>%{x}</b><br>%{y}% of NCs<extra></extra>")
-                    st.plotly_chart(figc, use_container_width=True, config=CHART_CONFIG, key="cov_single")
+                                       hovertemplate="<b>%{x}</b><br>%{y}% of NCs"
+                                                     "<br><i>click to list these NCs</i><extra></extra>")
+                    # on_select='rerun' makes the bars clickable (Streamlit >= 1.35).
+                    # The click drives the detail table lower down the page.
+                    _sel = st.plotly_chart(figc, use_container_width=True, config=CHART_CONFIG,
+                                           key="cov_single", on_select="rerun",
+                                           selection_mode="points")
+                    _pts = (_sel or {}).get("selection", {}).get("points", [])
+                    if _pts:
+                        _bar_pick = _pts[0].get("x")
                     st.caption(f"Share of the {_d:,} {_scope_txt} in range that carry each CAPA type. "
-                               "An NC missing from the CAPA tracker entirely counts as not covered.")
+                               "An NC missing from the CAPA tracker entirely counts as not covered. "
+                               "**Click a bar** to list just those NCs in the table below.")
 
                 st.download_button("📥 Excel", to_excel_bytes(df_cov, "CAPA_Coverage"),
                                    "capa_coverage.xlsx",
@@ -1196,6 +1216,89 @@ if HAS_CAPA_TYPE:
                                    "capa_combinations.xlsx",
                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                    key="dl_combo")
+
+        # ---- The NCs themselves, one row each ----
+        # The charts above answer "how many". This answers "which ones" — the list
+        # you can actually send to an owner. Clicking a bar filters it.
+        if _bar_pick:
+            st.markdown(f"**NCs with {_bar_pick}**" if _bar_pick != "No CAPA at all"
+                        else "**NCs with no CAPA at all**")
+        else:
+            st.markdown("**Every NC, one row each**")
+
+        # Origin Area / RC Category live on the RCA row only, so they are pulled
+        # with a scalar subquery rather than a join (a plain join to `capa` would
+        # return up to 3 rows per NC and silently triple the table).
+        _det_sql = f"""
+            SELECT
+                n.nc_id                                   AS "NC number",
+                COALESCE(n.project, '—')                  AS "Project",
+                COALESCE(n.flight_unit, '—')              AS "Flight Unit",
+                COALESCE(n.owner, '—')                    AS "Owner",
+                CASE WHEN n.is_open=1 THEN 'Open' ELSE 'Closed' END AS "Status",
+                CASE WHEN EXISTS(SELECT 1 FROM capa c WHERE c.nc_id=n.nc_id AND c.capa_type='RCA')
+                     THEN 'Yes' ELSE 'No' END             AS "RCA",
+                CASE WHEN EXISTS(SELECT 1 FROM capa c WHERE c.nc_id=n.nc_id AND c.capa_type='CA')
+                     THEN 'Yes' ELSE 'No' END             AS "CA",
+                CASE WHEN EXISTS(SELECT 1 FROM capa c WHERE c.nc_id=n.nc_id AND c.capa_type='PA')
+                     THEN 'Yes' ELSE 'No' END             AS "PA",
+                COALESCE((SELECT c.origin_area_l1 FROM capa c
+                          WHERE c.nc_id=n.nc_id AND c.capa_type='RCA'), '—')  AS "Origin Area",
+                COALESCE((SELECT c.rc_category_l1 FROM capa c
+                          WHERE c.nc_id=n.nc_id AND c.capa_type='RCA'), '—')  AS "Root Cause",
+                COALESCE((SELECT c.responsible FROM capa c
+                          WHERE c.nc_id=n.nc_id AND c.capa_type='RCA'), '—')  AS "RCA responsible"
+            FROM nc n
+            WHERE 1=1{_cov_flt}
+            ORDER BY n.project, n.nc_id
+        """
+        df_ncdetail = _q(_det_sql, _BF_PR)
+
+        # Follow the same view toggle as the charts above it
+        if view == "Open only":
+            df_ncdetail = df_ncdetail[df_ncdetail["Status"] == "Open"]
+        elif view == "Closed only":
+            df_ncdetail = df_ncdetail[df_ncdetail["Status"] == "Closed"]
+
+        # Then narrow to the clicked bar, if there was one. 'No CAPA at all' is the
+        # inverse of the other three, so it needs its own branch.
+        _pick_note = ""
+        _fname = "nc_capa_detail.xlsx"
+        if _bar_pick in ("RCA", "CA", "PA"):
+            df_ncdetail = df_ncdetail[df_ncdetail[_bar_pick] == "Yes"]
+            _pick_note = (f"Filtered to the **{_bar_pick}** bar — only NCs that have a "
+                          f"{_bar_pick} recorded. ")
+            _fname = f"nc_with_{_bar_pick.lower()}.xlsx"
+        elif _bar_pick == "No CAPA at all":
+            df_ncdetail = df_ncdetail[
+                (df_ncdetail[["RCA", "CA", "PA"]] == "No").all(axis=1)]
+            _pick_note = "Filtered to the **No CAPA at all** bar — only NCs with nothing recorded. "
+            _fname = "nc_with_no_capa.xlsx"
+
+        if _bar_pick:
+            if st.button("✕ Clear selection — show every NC", key="cov_clear"):
+                # Dropping the chart's stored selection is what resets the table;
+                # the widget re-renders unselected on the next run.
+                st.session_state.pop("cov_single", None)
+                st.session_state.pop("cov_side", None)
+                st.rerun()
+
+        if df_ncdetail.empty:
+            st.info("No NCs to show for this view.")
+        else:
+            _n_none = int((df_ncdetail[["RCA", "CA", "PA"]] == "No").all(axis=1).sum())
+            st.caption(
+                f"{_pick_note}"
+                f"{len(df_ncdetail):,} NCs. **Yes / No** = whether that NC has an RCA, CA or PA "
+                f"recorded in the CAPA tracker. **Origin Area** and **Root Cause** come from the "
+                f"RCA row — a dash means either there is no RCA, or there is one but the cause was "
+                f"left blank."
+                + ("" if _bar_pick else f" {_n_none:,} of these NCs have nothing recorded at all."))
+            st.dataframe(df_ncdetail, use_container_width=True, hide_index=True, height=420)
+            st.download_button("📥 Excel", to_excel_bytes(df_ncdetail, "NC_CAPA_Detail"),
+                               _fname,
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="dl_ncdetail")
 
     st.markdown("")
 
@@ -1376,6 +1479,7 @@ with st.container(border=True):
         ("NC_Total_per_Year", "df_yr"),
         ("CAPA_Coverage", "df_cov"),
         ("CAPA_Combinations", "df_combo"),
+        ("NC_CAPA_Detail", "df_ncdetail"),
         ("Origin_Area_L1", "df_o1"),
         ("RC_Category_L1", "df_r1"),
         ("RCA_Missing_Cause", "rca_blank"),
