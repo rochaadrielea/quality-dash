@@ -30,15 +30,16 @@ import pandas as pd
 DATA_DIR = Path("data")
 DB_FILE = "quality.db"
 TRACKER_SHEET = "NC_Tracker_Black_Out"
-CAPA_GLOB = "*CAPA*.xlsx"      # e.g. "USE THIS CAPA 2.0 Tracker_RCA Corrective Action....xlsx"
+CAPA_GLOB = "*CAPA*.xls*"      # matches .xlsx AND .xlsm (the real file is macro-enabled)
 CAPA_SHEET = "Requestor"
 
 
 # ---- FILE FINDERS ----
 def find_file(pattern):
-    """Find the newest file matching pattern in data/."""
+    """Find the newest file matching pattern in data/.
+    Skips Excel lock/temp files (~$...) which appear while a workbook is open."""
     DATA_DIR.mkdir(exist_ok=True)
-    candidates = sorted(DATA_DIR.glob(pattern))
+    candidates = [p for p in DATA_DIR.glob(pattern) if not p.name.startswith("~$")]
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)
