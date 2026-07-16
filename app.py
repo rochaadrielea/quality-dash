@@ -63,6 +63,13 @@ st.markdown("""
         border-radius: 12px;
         padding: 0.5rem 0.75rem;
     }
+    /* CAPA coverage section box */
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(div.coverage-anchor) {
+        background: #F3F0FA;
+        border: 2px solid #5A63A0 !important;
+        border-radius: 12px;
+        padding: 0.5rem 0.75rem;
+    }
     /* KPI cards with visible descriptions */
     .kpi-card {
         padding: 0.4rem 0.2rem 0.9rem 0;
@@ -96,10 +103,10 @@ def _q(sql, params=None):
         return pd.read_sql(sql, conn, params=params or [])
 
 
-def _has_column(col_name):
-    """Check if a column exists in the nc table."""
+def _has_column(col_name, table="nc"):
+    """Check if a column exists in a table."""
     try:
-        cols = _q("PRAGMA table_info(nc)")
+        cols = _q(f"PRAGMA table_info({table})")
         return col_name in cols["name"].values
     except Exception:
         return False
@@ -164,7 +171,9 @@ def build_full_report_bytes(datasets, include_since=True):
 
 
 CHART_CONFIG = {
-    "displayModeBar": True,
+    # 'hover' keeps the zoom/pan toolbar out of the plot area until you point at
+    # the chart — as 'True' it renders on top of the tallest bars and hides them.
+    "displayModeBar": "hover",
     "toImageButtonOptions": {
         "format": "png",
         "height": 600,
@@ -173,6 +182,9 @@ CHART_CONFIG = {
     },
     "displaylogo": False,
 }
+
+# Top margin reserved for the Plotly modebar so it never overlaps the top bar.
+MODEBAR_T = 40
 
 # Check schema once at startup
 HAS_SOURCE = _has_column("source")
@@ -188,6 +200,9 @@ def _has_table(name):
 
 HAS_CAPA = _has_table("capa")
 HAS_COPQ = _has_column("copq")
+# capa_type is what makes RCA / CA / PA reporting possible. Older DBs built by
+# the RCA-only ingest have no such column — coverage hides itself in that case.
+HAS_CAPA_TYPE = HAS_CAPA and _has_column("capa_type", "capa")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -200,6 +215,7 @@ with st.sidebar:
         <a href="#monthly" class="nav-link">Monthly Performance</a>
         <a href="#dashboard" class="nav-link">Quality Dashboard</a>
         <a href="#trends" class="nav-link">Trends & Breakdown</a>
+        <a href="#capa-coverage" class="nav-link">CAPA Coverage</a>
         <a href="#root-cause" class="nav-link">Root Cause</a>
         <a href="#data-quality" class="nav-link">Data Quality</a>
     """, unsafe_allow_html=True)
@@ -617,7 +633,7 @@ with st.container(border=True):
         fig1.add_trace(go.Scatter(x=actual["month"], y=actual["open"], name="Open at month-end",
                                   mode="lines+markers", line=dict(color="#1E2761", width=3), marker=dict(size=6),
                                   hovertemplate="<b>%{x}</b><br>Open: %{y}<extra></extra>"))
-        fig1.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0), barmode="group",
+        fig1.update_layout(height=300, margin=dict(l=0, r=0, t=MODEBAR_T, b=0), barmode="group",
                            legend=dict(orientation="h", y=-0.15), xaxis_title="", yaxis_title="NCs")
         st.plotly_chart(fig1, use_container_width=True, config=CHART_CONFIG)
         st.caption(f"Orange = NCs opened that month. Green = NCs closed that month. Navy line = total open at month-end. "
@@ -695,7 +711,7 @@ if not df_mo.empty:
                          hovertemplate="<b>%{x}</b><br>Opened: %{y} NCs<extra></extra>"))
     fig.add_trace(go.Bar(x=df_mo["month"], y=df_mo["closed"], name="Closed", marker_color="#4CAF50",
                          hovertemplate="<b>%{x}</b><br>Closed: %{y} NCs<extra></extra>"))
-    fig.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0), barmode="group",
+    fig.update_layout(height=280, margin=dict(l=0, r=0, t=MODEBAR_T, b=0), barmode="group",
                       legend=dict(orientation="h", y=-0.15), xaxis_title="", yaxis_title="NCs")
     st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
     st.caption("Orange = new NCs opened per month. Green = NCs closed per month. When orange exceeds green, the backlog grows that month.")
@@ -727,7 +743,7 @@ if not df_trend.empty:
     fig_tr.add_trace(go.Scatter(x=df_trend["month"], y=df_trend["closed"], name="Closed",
                                 mode="lines", line=dict(color="#4CAF50", width=2),
                                 hovertemplate="<b>%{x}</b><br>Closed: %{y}<extra></extra>"))
-    fig_tr.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0),
+    fig_tr.update_layout(height=280, margin=dict(l=0, r=0, t=MODEBAR_T, b=0),
                          legend=dict(orientation="h", y=-0.15), xaxis_title="", yaxis_title="NCs")
     st.plotly_chart(fig_tr, use_container_width=True, config=CHART_CONFIG)
     st.caption("Opened (orange) and closed (green) NCs per month across the full dataset. "
@@ -797,7 +813,7 @@ with col_a:
     if not df_proj.empty:
         fig = px.bar(df_proj, x="open_ncs", y="project", orientation="h",
                      color_discrete_sequence=["#1E2761"], text="open_ncs")
-        fig.update_layout(height=260, margin=dict(l=0, r=0, t=10, b=0), showlegend=False,
+        fig.update_layout(height=260, margin=dict(l=0, r=0, t=MODEBAR_T, b=0), showlegend=False,
                           yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="")
         fig.update_traces(textposition="outside", hovertemplate="<b>%{y}</b><br>Open NCs: %{x}<extra></extra>")
         st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
@@ -823,7 +839,7 @@ with col_a:
                     if not recorded.empty:
                         figd = px.bar(df_fu, x="open_ncs", y="flight_unit", orientation="h",
                                       color_discrete_sequence=["#F26E21"], text="open_ncs")
-                        figd.update_layout(height=max(180, 40 * len(df_fu)), margin=dict(l=0, r=0, t=10, b=0),
+                        figd.update_layout(height=max(180, 40 * len(df_fu)), margin=dict(l=0, r=0, t=MODEBAR_T, b=0),
                                            showlegend=False, yaxis=dict(categoryorder="total ascending"),
                                            xaxis_title="", yaxis_title="")
                         figd.update_traces(textposition="outside",
@@ -848,7 +864,7 @@ with col_b:
         colors = ["#E53E3E" if a.startswith("BLANK") else "#F26E21" for a in df_area["area"]]
         fig = px.bar(df_area, x="n", y="area", orientation="h", color=df_area["area"],
                      color_discrete_sequence=colors, text="n")
-        fig.update_layout(height=260, margin=dict(l=0, r=0, t=10, b=0), showlegend=False,
+        fig.update_layout(height=260, margin=dict(l=0, r=0, t=MODEBAR_T, b=0), showlegend=False,
                           yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="")
         fig.update_traces(textposition="outside", hovertemplate="<b>%{y}</b><br>NCs: %{x}<extra></extra>")
         st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
@@ -891,7 +907,7 @@ with col_c:
                          text=[int(_prod["open_ncs"]), int(_supp["open_ncs"])],
                          textposition="outside",
                          hovertemplate="<b>%{x}</b><br>Open: %{y}<extra></extra>"))
-    fig.update_layout(height=220, margin=dict(l=0, r=0, t=20, b=0), showlegend=False,
+    fig.update_layout(height=220, margin=dict(l=0, r=0, t=MODEBAR_T, b=0), showlegend=False,
                       xaxis_title="", yaxis_title="Open NCs")
     st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
     st.caption("Open NCs by origin — Production = internal manufacturing (Z3), Supplier = procurement complaints (Z2). "
@@ -926,7 +942,7 @@ with st.container(border=True):
     _yr_where = ("WHERE " + " AND ".join(_yr_cl + ["created_on IS NOT NULL"])) if (_yr_cl or True) else ""
     df_yr = _q(f"SELECT substr(created_on,1,4) AS yr, COUNT(*) AS n FROM nc {_yr_where} GROUP BY yr ORDER BY yr", _yr_pr)
     fig = px.bar(df_yr, x="yr", y="n", color_discrete_sequence=["#1E2761"], text="n")
-    fig.update_layout(height=240, margin=dict(l=0, r=0, t=10, b=0), showlegend=False, xaxis_title="", yaxis_title="")
+    fig.update_layout(height=240, margin=dict(l=0, r=0, t=MODEBAR_T, b=0), showlegend=False, xaxis_title="", yaxis_title="")
     fig.update_traces(textposition="outside", hovertemplate="<b>%{x}</b><br>Total NCs: %{y}<extra></extra>")
     st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
     st.caption("Full-history NC volume by year. Obeys Project / Owner / NC type / Status / Data source, "
@@ -938,6 +954,340 @@ with st.container(border=True):
                            key="dl_yr")
 
 st.markdown("")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CAPA COVERAGE — does every NC have an RCA, a CA and a PA?
+# ══════════════════════════════════════════════════════════════════════════════
+df_cov = None
+df_combo = None
+if HAS_CAPA_TYPE:
+    st.markdown('<div id="capa-coverage"></div>', unsafe_allow_html=True)
+    st.subheader("CAPA Coverage")
+
+    # Denominator = EVERY NC matching the active filter, not just the ones that
+    # already appear in the CAPA tracker. An NC with no CAPA row at all is the
+    # gap this section exists to surface, so it has to be inside the total.
+    _cov_flt = (" AND " + " AND ".join(_BF_CL)) if _BF_CL else ""
+
+    _cov_sql = f"""
+        WITH scope AS (
+            SELECT nc_id, is_open FROM nc WHERE 1=1{_cov_flt}
+        )
+        SELECT
+            COUNT(*) AS n_total,
+            SUM(CASE WHEN is_open=1 THEN 1 ELSE 0 END) AS n_open,
+            SUM(CASE WHEN is_open=0 THEN 1 ELSE 0 END) AS n_closed,
+            SUM(CASE WHEN rca THEN 1 ELSE 0 END) AS rca_all,
+            SUM(CASE WHEN rca AND is_open=1 THEN 1 ELSE 0 END) AS rca_open,
+            SUM(CASE WHEN rca AND is_open=0 THEN 1 ELSE 0 END) AS rca_closed,
+            SUM(CASE WHEN ca THEN 1 ELSE 0 END) AS ca_all,
+            SUM(CASE WHEN ca AND is_open=1 THEN 1 ELSE 0 END) AS ca_open,
+            SUM(CASE WHEN ca AND is_open=0 THEN 1 ELSE 0 END) AS ca_closed,
+            SUM(CASE WHEN pa THEN 1 ELSE 0 END) AS pa_all,
+            SUM(CASE WHEN pa AND is_open=1 THEN 1 ELSE 0 END) AS pa_open,
+            SUM(CASE WHEN pa AND is_open=0 THEN 1 ELSE 0 END) AS pa_closed,
+            SUM(CASE WHEN NOT rca AND NOT ca AND NOT pa THEN 1 ELSE 0 END) AS none_all,
+            SUM(CASE WHEN NOT rca AND NOT ca AND NOT pa AND is_open=1 THEN 1 ELSE 0 END) AS none_open,
+            SUM(CASE WHEN NOT rca AND NOT ca AND NOT pa AND is_open=0 THEN 1 ELSE 0 END) AS none_closed
+        FROM (
+            SELECT s.is_open,
+                EXISTS(SELECT 1 FROM capa c WHERE c.nc_id=s.nc_id AND c.capa_type='RCA') AS rca,
+                EXISTS(SELECT 1 FROM capa c WHERE c.nc_id=s.nc_id AND c.capa_type='CA')  AS ca,
+                EXISTS(SELECT 1 FROM capa c WHERE c.nc_id=s.nc_id AND c.capa_type='PA')  AS pa
+            FROM scope s
+        )
+    """
+    _cov = _q(_cov_sql, _BF_PR).iloc[0]
+
+    _n_total = int(_cov["n_total"] or 0)
+    _n_open = int(_cov["n_open"] or 0)
+    _n_closed = int(_cov["n_closed"] or 0)
+
+    if _n_total == 0:
+        st.info("No NCs in the selected range.")
+    else:
+        st.markdown('<div class="coverage-anchor"></div>', unsafe_allow_html=True)
+        with st.container(border=True):
+            view = st.radio(
+                "View", ["All NCs", "Open only", "Closed only", "Side by side"],
+                horizontal=True, key="cov_view",
+                help="The denominator is always every NC matching the sidebar filters — an NC with no "
+                     "CAPA row at all is counted as not covered. Open/Closed split the same total; they "
+                     "do not change it.")
+
+            _suffix = {"All NCs": "all", "Open only": "open", "Closed only": "closed"}
+            _denoms = {"all": _n_total, "open": _n_open, "closed": _n_closed}
+
+            def _cov_row(key):
+                """(label, count, denominator) for each CAPA type in one view."""
+                d = _denoms[key]
+                return [
+                    ("RCA", int(_cov[f"rca_{key}"] or 0), d),
+                    ("CA", int(_cov[f"ca_{key}"] or 0), d),
+                    ("PA", int(_cov[f"pa_{key}"] or 0), d),
+                    ("No CAPA at all", int(_cov[f"none_{key}"] or 0), d),
+                ]
+
+            _descs = {
+                "RCA": "NCs with a root cause analysis recorded in the CAPA tracker.",
+                "CA": "NCs with a corrective action recorded.",
+                # Deliberately neutral: whether every NC *needs* a PA is still an
+                # open question on the process side, so this doesn't imply a target.
+                "PA": "NCs with a preventive action recorded.",
+                "No CAPA at all": "NCs with no RCA, CA or PA row — nothing recorded.",
+            }
+
+            if view == "Side by side":
+                st.caption(f"**{_n_open:,} open** · **{_n_closed:,} closed** · {_n_total:,} total NCs in range")
+                _rows = []
+                for _lab in ["RCA", "CA", "PA", "No CAPA at all"]:
+                    _o = int(_cov[f"{_lab.split()[0].lower() if _lab != 'No CAPA at all' else 'none'}_open"] or 0)
+                    _c = int(_cov[f"{_lab.split()[0].lower() if _lab != 'No CAPA at all' else 'none'}_closed"] or 0)
+                    _rows.append({
+                        "CAPA type": _lab,
+                        "Open — with": _o,
+                        "Open — %": round(100 * _o / _n_open, 1) if _n_open else 0.0,
+                        "Closed — with": _c,
+                        "Closed — %": round(100 * _c / _n_closed, 1) if _n_closed else 0.0,
+                    })
+                df_cov = pd.DataFrame(_rows)
+
+                figc = go.Figure()
+                figc.add_trace(go.Bar(
+                    x=df_cov["CAPA type"], y=df_cov["Open — %"], name=f"Open (n={_n_open:,})",
+                    marker_color="#F26E21", text=[f"{v}%" for v in df_cov["Open — %"]],
+                    textposition="outside",
+                    hovertemplate="<b>%{x}</b><br>Open with: %{customdata}<br>%{y}% of open<extra></extra>",
+                    customdata=df_cov["Open — with"]))
+                figc.add_trace(go.Bar(
+                    x=df_cov["CAPA type"], y=df_cov["Closed — %"], name=f"Closed (n={_n_closed:,})",
+                    marker_color="#1E2761", text=[f"{v}%" for v in df_cov["Closed — %"]],
+                    textposition="outside",
+                    hovertemplate="<b>%{x}</b><br>Closed with: %{customdata}<br>%{y}% of closed<extra></extra>",
+                    customdata=df_cov["Closed — with"]))
+                figc.update_layout(height=320, margin=dict(l=0, r=0, t=MODEBAR_T, b=0), barmode="group",
+                                   legend=dict(orientation="h", y=-0.15),
+                                   xaxis_title="", yaxis_title="% of NCs",
+                                   yaxis=dict(range=[0, 105]))
+                st.plotly_chart(figc, use_container_width=True, config=CHART_CONFIG, key="cov_side")
+                st.caption("Each bar is a % of its **own** group (open, or closed) — the two groups have "
+                           "different denominators, so compare the shape, not the height. A newly opened NC "
+                           "has had no time to get an RCA yet, which is why open sits lower than closed.")
+                st.dataframe(df_cov, use_container_width=True, hide_index=True)
+
+            else:
+                _key = _suffix[view]
+                _d = _denoms[_key]
+                _scope_txt = {"all": "every NC", "open": "open NCs", "closed": "closed NCs"}[_key]
+                st.caption(f"Denominator: **{_d:,}** {_scope_txt} in range "
+                           f"({_n_open:,} open · {_n_closed:,} closed · {_n_total:,} total).")
+
+                if _d == 0:
+                    st.info(f"No {_scope_txt} in the selected range.")
+                    df_cov = pd.DataFrame()
+                else:
+                    _cards = _cov_row(_key)
+                    _cols = st.columns(4)
+                    for _c_, (_lab, _n, _dd) in zip(_cols, _cards):
+                        _pct = (100 * _n / _dd) if _dd else 0
+                        _c_.markdown(_kpi_card(
+                            f"NCs with {_lab}" if _lab != "No CAPA at all" else _lab,
+                            f"{_pct:.0f}%",
+                            f"{_n:,} of {_dd:,} — {_descs[_lab]}"), unsafe_allow_html=True)
+
+                    df_cov = pd.DataFrame([
+                        {"CAPA type": _lab, "NCs with": _n, "Of total": _dd,
+                         "%": round(100 * _n / _dd, 1) if _dd else 0.0}
+                        for _lab, _n, _dd in _cards])
+
+                    figc = px.bar(df_cov, x="CAPA type", y="%",
+                                  color_discrete_sequence=["#5A63A0"],
+                                  text=[f"{v}%" for v in df_cov["%"]])
+                    figc.update_layout(height=300, margin=dict(l=0, r=0, t=MODEBAR_T, b=0),
+                                       showlegend=False, xaxis_title="", yaxis_title="% of NCs",
+                                       yaxis=dict(range=[0, 105]))
+                    figc.update_traces(textposition="outside",
+                                       hovertemplate="<b>%{x}</b><br>%{y}% of NCs<extra></extra>")
+                    st.plotly_chart(figc, use_container_width=True, config=CHART_CONFIG, key="cov_single")
+                    st.caption(f"Share of the {_d:,} {_scope_txt} in range that carry each CAPA type. "
+                               "An NC missing from the CAPA tracker entirely counts as not covered.")
+
+                st.download_button("📥 Excel", to_excel_bytes(df_cov, "CAPA_Coverage"),
+                                   "capa_coverage.xlsx",
+                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key="dl_cov")
+
+        # ---- Which combination does each NC have? ----
+        st.markdown("**What each NC actually has**")
+        _combo_sql = f"""
+            WITH scope AS (SELECT nc_id, is_open FROM nc WHERE 1=1{_cov_flt}),
+            flags AS (
+                SELECT s.is_open,
+                    EXISTS(SELECT 1 FROM capa c WHERE c.nc_id=s.nc_id AND c.capa_type='RCA') AS rca,
+                    EXISTS(SELECT 1 FROM capa c WHERE c.nc_id=s.nc_id AND c.capa_type='CA')  AS ca,
+                    EXISTS(SELECT 1 FROM capa c WHERE c.nc_id=s.nc_id AND c.capa_type='PA')  AS pa
+                FROM scope s
+            )
+            SELECT
+                CASE
+                    WHEN rca AND ca AND pa THEN 'RCA + CA + PA'
+                    WHEN rca AND ca THEN 'RCA + CA'
+                    WHEN rca AND pa THEN 'RCA + PA'
+                    WHEN ca AND pa THEN 'CA + PA'
+                    WHEN rca THEN 'RCA only'
+                    WHEN ca THEN 'CA only'
+                    WHEN pa THEN 'PA only'
+                    ELSE 'Nothing recorded'
+                END AS combo,
+                COUNT(*) AS n,
+                SUM(CASE WHEN is_open=1 THEN 1 ELSE 0 END) AS n_open,
+                SUM(CASE WHEN is_open=0 THEN 1 ELSE 0 END) AS n_closed
+            FROM flags GROUP BY combo ORDER BY n DESC
+        """
+        df_combo = _q(_combo_sql, _BF_PR)
+        if not df_combo.empty:
+            _cmb = df_combo.copy()
+            if view == "Open only":
+                _cmb = _cmb[["combo", "n_open"]].rename(columns={"n_open": "n"})
+                _cmb = _cmb[_cmb["n"] > 0]
+            elif view == "Closed only":
+                _cmb = _cmb[["combo", "n_closed"]].rename(columns={"n_closed": "n"})
+                _cmb = _cmb[_cmb["n"] > 0]
+
+            if _cmb.empty:
+                st.info("Nothing to show for this view.")
+            else:
+                _cmb_colors = ["#E53E3E" if c == "Nothing recorded" else "#5A63A0"
+                               for c in _cmb["combo"]]
+                figk = px.bar(_cmb, x="n", y="combo", orientation="h",
+                              color=_cmb["combo"], color_discrete_sequence=_cmb_colors, text="n")
+                figk.update_layout(height=max(220, 40 * len(_cmb)),
+                                   margin=dict(l=0, r=0, t=MODEBAR_T, b=0), showlegend=False,
+                                   yaxis=dict(categoryorder="total ascending"),
+                                   xaxis_title="NCs", yaxis_title="")
+                figk.update_traces(textposition="outside",
+                                   hovertemplate="<b>%{y}</b><br>NCs: %{x}<extra></extra>")
+                st.plotly_chart(figk, use_container_width=True, config=CHART_CONFIG, key="cov_combo")
+                st.caption("Every NC in range falls into exactly one bar. Red = nothing recorded at all. "
+                           "This is the same population as the cards above, cut a different way.")
+                st.download_button("📥 Excel", to_excel_bytes(df_combo, "CAPA_Combinations"),
+                                   "capa_combinations.xlsx",
+                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key="dl_combo")
+
+    st.markdown("")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ROOT CAUSE (CAPA / RCA tracker)
+# ══════════════════════════════════════════════════════════════════════════════
+if HAS_CAPA:
+    st.markdown('<div id="root-cause"></div>', unsafe_allow_html=True)
+    st.subheader("Root Cause Analysis")
+    st.caption(f"📅 {date_from} → {date_to} · From the CAPA/RCA tracker, joined to NCs on NC number. "
+               "**RCA rows only** — Origin Area and RC Category are recorded on the RCA row; CA and PA "
+               "rows carry the action, not the cause. Blank / N/A / 0 are excluded, so these charts show "
+               "only NCs where a root cause was actually written down.")
+
+    # CAPA joined to nc so the sidebar filters apply
+    _rc_flt = (" AND " + " AND ".join(_BF_CL)) if _BF_CL else ""
+    # Restrict to RCA rows — with all three types now in the table, an unqualified
+    # join would count each NC up to 3 times.
+    _rca_only = " AND c.capa_type='RCA'" if HAS_CAPA_TYPE else ""
+
+    # Denominator: NCs that have an RCA row at all. The "of every NC" version of
+    # this question is the CAPA Coverage section above; here the useful question
+    # is "of the RCAs we did write, how many recorded a cause".
+    _rc_total = _q(f"SELECT COUNT(*) n FROM capa c JOIN nc USING(nc_id) "
+                   f"WHERE 1=1{_rca_only}{_rc_flt}", _BF_PR).iloc[0]["n"]
+
+    rc1, rc2 = st.columns(2)
+
+    # ---- Real Origin Area L1 (+ L2 drill-down) ----
+    with rc1:
+        st.markdown("**NCs by Real Origin Area (L1)**")
+        df_o1 = _q(f"""SELECT c.origin_area_l1 AS area, COUNT(*) AS n
+                       FROM capa c JOIN nc USING(nc_id)
+                       WHERE c.origin_area_l1 IS NOT NULL{_rca_only}{_rc_flt}
+                       GROUP BY area ORDER BY n DESC""", _BF_PR)
+        if not df_o1.empty:
+            fig = px.bar(df_o1, x="n", y="area", orientation="h",
+                         color_discrete_sequence=["#1C7293"], text="n")
+            fig.update_layout(height=280, margin=dict(l=0, r=0, t=MODEBAR_T, b=0), showlegend=False,
+                              yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="")
+            fig.update_traces(textposition="outside", hovertemplate="<b>%{y}</b><br>NCs: %{x}<extra></extra>")
+            st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
+            st.caption(f"Where the problem actually originated. **{int(df_o1['n'].sum())}** of "
+                       f"{int(_rc_total)} NCs **with an RCA** have an Origin Area recorded. "
+                       f"(For coverage against every NC, see CAPA Coverage above.)")
+            st.download_button("📥 Excel", to_excel_bytes(df_o1, "Origin_Area_L1"),
+                               "origin_area_l1.xlsx",
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="dl_o1")
+
+            _o_pick = st.selectbox("🔍 Explode an Origin Area into L2",
+                                   ["— select —"] + df_o1["area"].tolist(), key="o1_drill")
+            if _o_pick != "— select —":
+                df_o2 = _q(f"""SELECT COALESCE(c.origin_area_l2,'(L2 not recorded)') AS sub, COUNT(*) AS n
+                               FROM capa c JOIN nc USING(nc_id)
+                               WHERE c.origin_area_l1 = ?{_rca_only}{_rc_flt}
+                               GROUP BY sub ORDER BY n DESC""", [_o_pick] + _BF_PR)
+                if not df_o2.empty:
+                    figd = px.bar(df_o2, x="n", y="sub", orientation="h",
+                                  color_discrete_sequence=["#65A6C0"], text="n")
+                    figd.update_layout(height=max(160, 42 * len(df_o2)), margin=dict(l=0, r=0, t=MODEBAR_T, b=0),
+                                       showlegend=False, yaxis=dict(categoryorder="total ascending"),
+                                       xaxis_title="", yaxis_title="")
+                    figd.update_traces(textposition="outside",
+                                       hovertemplate="<b>%{y}</b><br>NCs: %{x}<extra></extra>")
+                    st.plotly_chart(figd, use_container_width=True, config=CHART_CONFIG, key="o2_chart")
+                    st.caption(f"L2 breakdown for **{_o_pick}**.")
+        else:
+            st.info("No Origin Area recorded for the current selection.")
+
+    # ---- RC Category L1 (+ L2 drill-down) ----
+    with rc2:
+        st.markdown("**NCs by RC Category (L1)**")
+        df_r1 = _q(f"""SELECT c.rc_category_l1 AS cat, COUNT(*) AS n
+                       FROM capa c JOIN nc USING(nc_id)
+                       WHERE c.rc_category_l1 IS NOT NULL{_rca_only}{_rc_flt}
+                       GROUP BY cat ORDER BY n DESC""", _BF_PR)
+        if not df_r1.empty:
+            fig = px.bar(df_r1, x="n", y="cat", orientation="h",
+                         color_discrete_sequence=["#21295C"], text="n")
+            fig.update_layout(height=280, margin=dict(l=0, r=0, t=MODEBAR_T, b=0), showlegend=False,
+                              yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="")
+            fig.update_traces(textposition="outside", hovertemplate="<b>%{y}</b><br>NCs: %{x}<extra></extra>")
+            st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
+            st.caption(f"What kind of cause it was. **{int(df_r1['n'].sum())}** of {int(_rc_total)} NCs "
+                       f"**with an RCA** have an RC Category recorded.")
+            st.download_button("📥 Excel", to_excel_bytes(df_r1, "RC_Category_L1"),
+                               "rc_category_l1.xlsx",
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="dl_r1")
+
+            _r_pick = st.selectbox("🔍 Explode an RC Category into L2",
+                                   ["— select —"] + df_r1["cat"].tolist(), key="r1_drill")
+            if _r_pick != "— select —":
+                df_r2 = _q(f"""SELECT COALESCE(c.rc_category_l2,'(L2 not recorded)') AS sub, COUNT(*) AS n
+                               FROM capa c JOIN nc USING(nc_id)
+                               WHERE c.rc_category_l1 = ?{_rca_only}{_rc_flt}
+                               GROUP BY sub ORDER BY n DESC""", [_r_pick] + _BF_PR)
+                if not df_r2.empty:
+                    figd = px.bar(df_r2, x="n", y="sub", orientation="h",
+                                  color_discrete_sequence=["#5A63A0"], text="n")
+                    figd.update_layout(height=max(160, 42 * len(df_r2)), margin=dict(l=0, r=0, t=MODEBAR_T, b=0),
+                                       showlegend=False, yaxis=dict(categoryorder="total ascending"),
+                                       xaxis_title="", yaxis_title="")
+                    figd.update_traces(textposition="outside",
+                                       hovertemplate="<b>%{y}</b><br>NCs: %{x}<extra></extra>")
+                    st.plotly_chart(figd, use_container_width=True, config=CHART_CONFIG, key="r2_chart")
+                    st.caption(f"L2 breakdown for **{_r_pick}**.")
+        else:
+            st.info("No RC Category recorded for the current selection.")
+
+    st.markdown("")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -958,111 +1308,28 @@ with dl1:
                        "data_quality.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key="dl_dq")
 
+# ---- RCA rows that exist but never recorded a cause: the actionable cleanup list ----
+rca_blank = None
+if HAS_CAPA_TYPE:
+    rca_blank = _q(f"""
+        SELECT c.nc_id, n.project, n.owner, c.responsible, n.status
+        FROM capa c JOIN nc n USING(nc_id)
+        WHERE c.capa_type='RCA'
+          AND (c.origin_area_l1 IS NULL OR c.rc_category_l1 IS NULL)
+          {_BF_CL and (' AND ' + ' AND '.join(_BF_CL)) or ''}
+        ORDER BY n.project, c.nc_id
+    """, _BF_PR)
+    st.caption(f"**{len(rca_blank)} NCs have an RCA row but no Origin Area and/or no RC Category.** "
+               "These are the ones where the analysis was opened but the cause was never written down — "
+               "the fastest fill-rate win.")
+    st.dataframe(rca_blank, use_container_width=True, hide_index=True, height=240)
+    st.download_button("📥 Excel", to_excel_bytes(rca_blank, "RCA_Missing_Cause"),
+                       "rca_missing_cause.xlsx",
+                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       key="dl_rca_blank")
+
 st.caption(f"Data source: `quality.db` · Last modified: "
            f"{datetime.fromtimestamp(Path(DB_FILE).stat().st_mtime).strftime('%d.%m.%Y %H:%M')}")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ROOT CAUSE (CAPA / RCA tracker)
-# ══════════════════════════════════════════════════════════════════════════════
-if HAS_CAPA:
-    st.markdown('<div id="root-cause"></div>', unsafe_allow_html=True)
-    st.subheader("Root Cause Analysis")
-    st.caption(f"📅 {date_from} → {date_to} · From the CAPA/RCA tracker, joined to NCs on NC number "
-               "(RCA rows only — one per NC). Blank / N/A / 0 are excluded, so these charts show only "
-               "NCs where a root cause was actually recorded.")
-
-    # CAPA joined to nc so the sidebar filters apply
-    _rc_flt = (" AND " + " AND ".join(_BF_CL)) if _BF_CL else ""
-
-    _rc_total = _q(f"SELECT COUNT(*) n FROM capa JOIN nc USING(nc_id) WHERE 1=1{_rc_flt}",
-                   _BF_PR).iloc[0]["n"]
-
-    rc1, rc2 = st.columns(2)
-
-    # ---- Real Origin Area L1 (+ L2 drill-down) ----
-    with rc1:
-        st.markdown("**NCs by Real Origin Area (L1)**")
-        df_o1 = _q(f"""SELECT c.origin_area_l1 AS area, COUNT(*) AS n
-                       FROM capa c JOIN nc USING(nc_id)
-                       WHERE c.origin_area_l1 IS NOT NULL{_rc_flt}
-                       GROUP BY area ORDER BY n DESC""", _BF_PR)
-        if not df_o1.empty:
-            fig = px.bar(df_o1, x="n", y="area", orientation="h",
-                         color_discrete_sequence=["#1C7293"], text="n")
-            fig.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0), showlegend=False,
-                              yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="")
-            fig.update_traces(textposition="outside", hovertemplate="<b>%{y}</b><br>NCs: %{x}<extra></extra>")
-            st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
-            st.caption(f"Where the problem actually originated. **{int(df_o1['n'].sum())}** of "
-                       f"{int(_rc_total)} NCs have an Origin Area recorded.")
-            st.download_button("📥 Excel", to_excel_bytes(df_o1, "Origin_Area_L1"),
-                               "origin_area_l1.xlsx",
-                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               key="dl_o1")
-
-            _o_pick = st.selectbox("🔍 Explode an Origin Area into L2",
-                                   ["— select —"] + df_o1["area"].tolist(), key="o1_drill")
-            if _o_pick != "— select —":
-                df_o2 = _q(f"""SELECT COALESCE(c.origin_area_l2,'(L2 not recorded)') AS sub, COUNT(*) AS n
-                               FROM capa c JOIN nc USING(nc_id)
-                               WHERE c.origin_area_l1 = ?{_rc_flt}
-                               GROUP BY sub ORDER BY n DESC""", [_o_pick] + _BF_PR)
-                if not df_o2.empty:
-                    figd = px.bar(df_o2, x="n", y="sub", orientation="h",
-                                  color_discrete_sequence=["#65A6C0"], text="n")
-                    figd.update_layout(height=max(160, 42 * len(df_o2)), margin=dict(l=0, r=0, t=10, b=0),
-                                       showlegend=False, yaxis=dict(categoryorder="total ascending"),
-                                       xaxis_title="", yaxis_title="")
-                    figd.update_traces(textposition="outside",
-                                       hovertemplate="<b>%{y}</b><br>NCs: %{x}<extra></extra>")
-                    st.plotly_chart(figd, use_container_width=True, config=CHART_CONFIG, key="o2_chart")
-                    st.caption(f"L2 breakdown for **{_o_pick}**.")
-        else:
-            st.info("No Origin Area recorded for the current selection.")
-
-    # ---- RC Category L1 (+ L2 drill-down) ----
-    with rc2:
-        st.markdown("**NCs by RC Category (L1)**")
-        df_r1 = _q(f"""SELECT c.rc_category_l1 AS cat, COUNT(*) AS n
-                       FROM capa c JOIN nc USING(nc_id)
-                       WHERE c.rc_category_l1 IS NOT NULL{_rc_flt}
-                       GROUP BY cat ORDER BY n DESC""", _BF_PR)
-        if not df_r1.empty:
-            fig = px.bar(df_r1, x="n", y="cat", orientation="h",
-                         color_discrete_sequence=["#21295C"], text="n")
-            fig.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0), showlegend=False,
-                              yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="")
-            fig.update_traces(textposition="outside", hovertemplate="<b>%{y}</b><br>NCs: %{x}<extra></extra>")
-            st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
-            st.caption(f"What kind of cause it was. **{int(df_r1['n'].sum())}** of {int(_rc_total)} NCs "
-                       f"have an RC Category recorded.")
-            st.download_button("📥 Excel", to_excel_bytes(df_r1, "RC_Category_L1"),
-                               "rc_category_l1.xlsx",
-                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               key="dl_r1")
-
-            _r_pick = st.selectbox("🔍 Explode an RC Category into L2",
-                                   ["— select —"] + df_r1["cat"].tolist(), key="r1_drill")
-            if _r_pick != "— select —":
-                df_r2 = _q(f"""SELECT COALESCE(c.rc_category_l2,'(L2 not recorded)') AS sub, COUNT(*) AS n
-                               FROM capa c JOIN nc USING(nc_id)
-                               WHERE c.rc_category_l1 = ?{_rc_flt}
-                               GROUP BY sub ORDER BY n DESC""", [_r_pick] + _BF_PR)
-                if not df_r2.empty:
-                    figd = px.bar(df_r2, x="n", y="sub", orientation="h",
-                                  color_discrete_sequence=["#5A63A0"], text="n")
-                    figd.update_layout(height=max(160, 42 * len(df_r2)), margin=dict(l=0, r=0, t=10, b=0),
-                                       showlegend=False, yaxis=dict(categoryorder="total ascending"),
-                                       xaxis_title="", yaxis_title="")
-                    figd.update_traces(textposition="outside",
-                                       hovertemplate="<b>%{y}</b><br>NCs: %{x}<extra></extra>")
-                    st.plotly_chart(figd, use_container_width=True, config=CHART_CONFIG, key="r2_chart")
-                    st.caption(f"L2 breakdown for **{_r_pick}**.")
-        else:
-            st.info("No RC Category recorded for the current selection.")
-
-    st.markdown("")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1086,8 +1353,11 @@ with st.container(border=True):
         ("Production_vs_Supplier", "df_ps"),
         ("Owner_Workload", "df_own"),
         ("NC_Total_per_Year", "df_yr"),
+        ("CAPA_Coverage", "df_cov"),
+        ("CAPA_Combinations", "df_combo"),
         ("Origin_Area_L1", "df_o1"),
         ("RC_Category_L1", "df_r1"),
+        ("RCA_Missing_Cause", "rca_blank"),
         ("Data_Quality", "incomplete"),
     ]:
         _d = globals().get(_var)
