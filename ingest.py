@@ -30,6 +30,8 @@ import pandas as pd
 DATA_DIR = Path("data")
 DB_FILE = "quality.db"
 TRACKER_SHEET = "NC_Tracker_Black_Out"
+CAPA_GLOB = "*CAPA*.xlsx"      # e.g. "USE THIS CAPA 2.0 Tracker_RCA Corrective Action....xlsx"
+CAPA_SHEET = "Requestor"
 
 
 # ---- FILE FINDERS ----
@@ -137,6 +139,118 @@ def parse_date(val):
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 1: Load the NCR Cutover Tracker
 # ══════════════════════════════════════════════════════════════════════════════
+def clean_level(val):
+    """Clean an Origin/RC level value. '0', 'N/A', blank -> None (not recorded)."""
+    if pd.isna(val):
+        return None
+    v = str(val).strip()
+    if not v or v == '\xa0':
+        return None
+    if v.upper() in ("N/A", "NA", "N.A.", "-", "#N/A", "NONE"):
+        return None
+    if v == "0":          # '0' is the placeholder people type for "nothing"
+        return None
+    return v
+
+
+def load_capa():
+    """Load the CAPA / RCA tracker. OPTIONAL — returns None if the file isn't in data/.
+
+    Keeps RCA rows only (one row per NC; CA/PA rows carry no root cause).
+    Header row is auto-detected so a banner row above it won't break the load.
+    """
+    path = find_file(CAPA_GLOB)
+    if path is None:
+        print(f"  No {CAPA_GLOB} in {DATA_DIR}/ — skipping CAPA (charts will hide).")
+        return None
+    print(f"  Reading {path.name}...")
+
+    try:
+        xl = pd.ExcelFile(path)
+        sheet = CAPA_SHEET if CAPA_SHEET in xl.sheet_names else xl.sheet_names[0]
+        if sheet != CAPA_SHEET:
+            print(f"  ! Sheet '{CAPA_SHEET}' not found, using '{sheet}'. Tabs: {xl.sheet_names}")
+
+        # Auto-detect the header row: the row containing 'NC/SCAR'
+        probe = pd.read_excel(path, sheet_name=sheet, header=None, nrows=12, dtype=str)
+        header_row = 0
+        for i in range(len(probe)):
+            row_txt = " ".join(str(x) for x in probe.iloc[i].tolist())
+            if "NC/SCAR" in row_txt:
+                header_row = i
+                break
+        df = pd.read_excel(path, sheet_name=sheet, header=header_row, dtype=str)
+    except Exception as e:
+        print(f"  ! Could not read CAPA file: {e} — skipping.")
+        return None
+
+    df.columns = [str(c).strip() for c in df.columns]
+
+    def pick(*names):
+        for n in names:
+            if n in df.columns:
+                return n
+        return None
+
+    c_nc = pick("NC/SCAR Number", "NC/SCAR", "NC Number")
+    c_type = pick("CAPA Type")
+    if c_nc is None:
+        print(f"  ! No 'NC/SCAR Number' column found. Columns: {list(df.columns)[:12]} — skipping.")
+        return None
+
+    def _clean_id(x):
+        # Match the SAP loader's nc_id format exactly, or the join silently fails
+        if pd.isna(x):
+            return None
+        if isinstance(x, (int, float)):
+            try:
+                return str(int(x))
+            except Exception:
+                return clean_text(x)
+        s = clean_text(x)
+        if s is None:
+            return None
+        try:                      # '213952.0' -> '213952'
+            return str(int(float(s)))
+        except Exception:
+            return s
+
+    out = pd.DataFrame()
+    out["nc_id"] = df[c_nc].apply(_clean_id)
+    out["capa_type"] = df[c_type].astype(str).str.strip() if c_type else None
+    for tgt, src in [
+        ("origin_area_l1", pick("(Real) Origin Area L1", "Origin Area L1")),
+        ("origin_area_l2", pick("(Real) Origin Area L2", "Origin Area L2")),
+        ("rc_category_l1", pick("RC Category L1")),
+        ("rc_category_l2", pick("RC Category L2")),
+    ]:
+        out[tgt] = df[src].apply(clean_level) if src else None
+    for tgt, src in [
+        ("capa_project", pick("Affected Project")),
+        ("requestor", pick("Requestor")),
+        ("responsible", pick("Responsible")),
+        ("capa_created_on", pick("Creation date requestor")),
+    ]:
+        out[tgt] = df[src].apply(clean_text) if src else None
+
+    out = out[out["nc_id"].notna()].copy()
+
+    # RCA rows only -> one row per NC, and the row that carries the root cause
+    if c_type:
+        rca = out[out["capa_type"].str.upper() == "RCA"].copy()
+        if rca.empty:
+            print("  ! No RCA rows found; keeping all CAPA rows instead.")
+        else:
+            out = rca
+    out = out.drop_duplicates(subset=["nc_id"], keep="last")
+
+    n_o1 = out["origin_area_l1"].notna().sum()
+    n_r1 = out["rc_category_l1"].notna().sum()
+    print(f"  {len(out)} CAPA rows (RCA, one per NC). "
+          f"Origin L1 filled: {n_o1} | RC Category L1 filled: {n_r1}")
+    return out
+
+
 def load_tracker():
     """Load and clean the NCR Cutover Tracker."""
     f = find_file("NCR_Cutover_Tracker*.xlsx")
@@ -432,12 +546,19 @@ def merge_data(tracker_df, sap_df):
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 4: Write to SQLite
 # ══════════════════════════════════════════════════════════════════════════════
-def write_db(df):
-    """Write merged DataFrame to SQLite."""
+def write_db(df, capa=None):
+    """Write merged DataFrame to SQLite. Optionally write the CAPA table too."""
     conn = sqlite3.connect(DB_FILE)
     df.to_sql("nc", conn, if_exists="replace", index=False)
 
     cur = conn.cursor()
+    # CAPA table is optional — only created when the file is present
+    cur.execute("DROP TABLE IF EXISTS capa")
+    if capa is not None and not capa.empty:
+        capa.to_sql("capa", conn, if_exists="replace", index=False)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_capa_nc ON capa(nc_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_capa_o1 ON capa(origin_area_l1)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_capa_rc1 ON capa(rc_category_l1)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_nc_project ON nc(project)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_nc_status ON nc(status)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_nc_owner ON nc(owner)")
@@ -457,17 +578,20 @@ def main():
     print("Quality DB Ingest — Merge Tracker + SAP Overview")
     print("=" * 60)
 
-    print("\n[1/4] Loading NCR Cutover Tracker...")
+    print("\n[1/5] Loading NCR Cutover Tracker...")
     tracker = load_tracker()
 
-    print("\n[2/4] Loading SAP NC Overview...")
+    print("\n[2/5] Loading SAP NC Overview...")
     sap = load_sap_overview()
 
-    print("\n[3/4] Merging (deduplicating overlaps)...")
+    print("\n[3/5] Merging (deduplicating overlaps)...")
     merged = merge_data(tracker, sap)
 
-    print("\n[4/4] Writing to SQLite...")
-    conn = write_db(merged)
+    print("\n[4/5] Loading CAPA / RCA tracker (optional)...")
+    capa = load_capa()
+
+    print("\n[5/5] Writing to SQLite...")
+    conn = write_db(merged, capa)
 
     # Summary
     stats = pd.read_sql("""

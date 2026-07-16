@@ -176,6 +176,17 @@ CHART_CONFIG = {
 
 # Check schema once at startup
 HAS_SOURCE = _has_column("source")
+
+
+def _has_table(name):
+    try:
+        t = _q("SELECT name FROM sqlite_master WHERE type='table' AND name=?", [name])
+        return not t.empty
+    except Exception:
+        return False
+
+
+HAS_CAPA = _has_table("capa")
 HAS_COPQ = _has_column("copq")
 
 
@@ -189,6 +200,7 @@ with st.sidebar:
         <a href="#monthly" class="nav-link">Monthly Performance</a>
         <a href="#dashboard" class="nav-link">Quality Dashboard</a>
         <a href="#trends" class="nav-link">Trends & Breakdown</a>
+        <a href="#root-cause" class="nav-link">Root Cause</a>
         <a href="#data-quality" class="nav-link">Data Quality</a>
     """, unsafe_allow_html=True)
     st.markdown("---")
@@ -397,9 +409,10 @@ def _qf(tmpl, extra=None, date_col="created_on", use_date=True):
 st.markdown('<div id="burndown"></div>', unsafe_allow_html=True)
 st.subheader(f"NC Burndown Tracker · since {exercise_start.strftime('%d %B %Y')}")
 st.caption(f"⚓ **Since {exercise_start.strftime('%d %b %Y')}** = the date the burndown measures from. "
-           f"It drives **only the KPI numbers below** (Backlog at freeze, Closed since start, Still open, "
-           f"New since start, New still open). Every chart follows the **From/To** window "
-           f"(**{date_from}** → **{date_to}**).")
+           f"It drives **only the KPI numbers below**. The three *backlog* figures (Backlog at freeze, "
+           f"Closed since start, Still open) describe NCs created **before** that date, so they are not "
+           f"clipped by the From date — but they do follow the Project / Owner / NC-type filters. "
+           f"Every chart follows the **From/To** window (**{date_from}** → **{date_to}**).")
 
 es = str(exercise_start)
 
@@ -426,17 +439,26 @@ def _bd_filter(include_dates=True):
 
 # Full filter (with dates) used across the whole dashboard.
 _BF_CL, _BF_PR = _bd_filter(include_dates=True)
+# Non-date filter — for the BACKLOG KPIs, which describe NCs created BEFORE the
+# 'Since' anchor. Applying "created_on >= From" to them is self-contradictory
+# (it asks for NCs both before Since and after From) and always yields 0.
+_NB_CL, _NB_PR = _bd_filter(include_dates=False)
 _filter_sig = f"{date_from}|{date_to}|{nc_type}|{nc_status}|{'-'.join(sorted(nc_project))}|{'-'.join(sorted(nc_owner))}|{nc_source}"
-def _bd(where_parts, params):
-    """Run a burndown count query with the active filter AND-ed in."""
-    parts = list(where_parts) + _BF_CL
-    prm = list(params) + _BF_PR
+
+def _bd(where_parts, params, use_dates=True):
+    """Run a burndown count query with the active filter AND-ed in.
+    use_dates=False for backlog metrics that look before the From date."""
+    _cl, _pr = (_BF_CL, _BF_PR) if use_dates else (_NB_CL, _NB_PR)
+    parts = list(where_parts) + _cl
+    prm = list(params) + _pr
     sql = "SELECT COUNT(*) AS n FROM nc" + (" WHERE " + " AND ".join(parts) if parts else "")
     return _q(sql, prm).iloc[0]["n"]
 
-backlog_at_start = _bd(["created_on < ?", "(is_open=1 OR closure_date >= ?)"], [es, es])
-closed_from_backlog = _bd(["created_on < ?", "is_open=0", "closure_date >= ?"], [es, es])
-still_open_backlog = _bd(["created_on < ?", "is_open=1"], [es])
+# Backlog metrics look BEFORE 'Since', so they must not be clipped by the From date.
+backlog_at_start = _bd(["created_on < ?", "(is_open=1 OR closure_date >= ?)"], [es, es], use_dates=False)
+closed_from_backlog = _bd(["created_on < ?", "is_open=0", "closure_date >= ?"], [es, es], use_dates=False)
+still_open_backlog = _bd(["created_on < ?", "is_open=1"], [es], use_dates=False)
+# These live inside the window, so they follow the full filter.
 new_since_start = _bd(["created_on >= ?"], [es])
 new_still_open = _bd(["created_on >= ?", "is_open=1"], [es])
 total_open = _bd(["is_open=1"], [])
@@ -941,6 +963,109 @@ st.caption(f"Data source: `quality.db` · Last modified: "
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ROOT CAUSE (CAPA / RCA tracker)
+# ══════════════════════════════════════════════════════════════════════════════
+if HAS_CAPA:
+    st.markdown('<div id="root-cause"></div>', unsafe_allow_html=True)
+    st.subheader("Root Cause Analysis")
+    st.caption(f"📅 {date_from} → {date_to} · From the CAPA/RCA tracker, joined to NCs on NC number "
+               "(RCA rows only — one per NC). Blank / N/A / 0 are excluded, so these charts show only "
+               "NCs where a root cause was actually recorded.")
+
+    # CAPA joined to nc so the sidebar filters apply
+    _rc_flt = (" AND " + " AND ".join(_BF_CL)) if _BF_CL else ""
+
+    _rc_total = _q(f"SELECT COUNT(*) n FROM capa JOIN nc USING(nc_id) WHERE 1=1{_rc_flt}",
+                   _BF_PR).iloc[0]["n"]
+
+    rc1, rc2 = st.columns(2)
+
+    # ---- Real Origin Area L1 (+ L2 drill-down) ----
+    with rc1:
+        st.markdown("**NCs by Real Origin Area (L1)**")
+        df_o1 = _q(f"""SELECT c.origin_area_l1 AS area, COUNT(*) AS n
+                       FROM capa c JOIN nc USING(nc_id)
+                       WHERE c.origin_area_l1 IS NOT NULL{_rc_flt}
+                       GROUP BY area ORDER BY n DESC""", _BF_PR)
+        if not df_o1.empty:
+            fig = px.bar(df_o1, x="n", y="area", orientation="h",
+                         color_discrete_sequence=["#1C7293"], text="n")
+            fig.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0), showlegend=False,
+                              yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="")
+            fig.update_traces(textposition="outside", hovertemplate="<b>%{y}</b><br>NCs: %{x}<extra></extra>")
+            st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
+            st.caption(f"Where the problem actually originated. **{int(df_o1['n'].sum())}** of "
+                       f"{int(_rc_total)} NCs have an Origin Area recorded.")
+            st.download_button("📥 Excel", to_excel_bytes(df_o1, "Origin_Area_L1"),
+                               "origin_area_l1.xlsx",
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="dl_o1")
+
+            _o_pick = st.selectbox("🔍 Explode an Origin Area into L2",
+                                   ["— select —"] + df_o1["area"].tolist(), key="o1_drill")
+            if _o_pick != "— select —":
+                df_o2 = _q(f"""SELECT COALESCE(c.origin_area_l2,'(L2 not recorded)') AS sub, COUNT(*) AS n
+                               FROM capa c JOIN nc USING(nc_id)
+                               WHERE c.origin_area_l1 = ?{_rc_flt}
+                               GROUP BY sub ORDER BY n DESC""", [_o_pick] + _BF_PR)
+                if not df_o2.empty:
+                    figd = px.bar(df_o2, x="n", y="sub", orientation="h",
+                                  color_discrete_sequence=["#65A6C0"], text="n")
+                    figd.update_layout(height=max(160, 42 * len(df_o2)), margin=dict(l=0, r=0, t=10, b=0),
+                                       showlegend=False, yaxis=dict(categoryorder="total ascending"),
+                                       xaxis_title="", yaxis_title="")
+                    figd.update_traces(textposition="outside",
+                                       hovertemplate="<b>%{y}</b><br>NCs: %{x}<extra></extra>")
+                    st.plotly_chart(figd, use_container_width=True, config=CHART_CONFIG, key="o2_chart")
+                    st.caption(f"L2 breakdown for **{_o_pick}**.")
+        else:
+            st.info("No Origin Area recorded for the current selection.")
+
+    # ---- RC Category L1 (+ L2 drill-down) ----
+    with rc2:
+        st.markdown("**NCs by RC Category (L1)**")
+        df_r1 = _q(f"""SELECT c.rc_category_l1 AS cat, COUNT(*) AS n
+                       FROM capa c JOIN nc USING(nc_id)
+                       WHERE c.rc_category_l1 IS NOT NULL{_rc_flt}
+                       GROUP BY cat ORDER BY n DESC""", _BF_PR)
+        if not df_r1.empty:
+            fig = px.bar(df_r1, x="n", y="cat", orientation="h",
+                         color_discrete_sequence=["#21295C"], text="n")
+            fig.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0), showlegend=False,
+                              yaxis=dict(categoryorder="total ascending"), xaxis_title="", yaxis_title="")
+            fig.update_traces(textposition="outside", hovertemplate="<b>%{y}</b><br>NCs: %{x}<extra></extra>")
+            st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
+            st.caption(f"What kind of cause it was. **{int(df_r1['n'].sum())}** of {int(_rc_total)} NCs "
+                       f"have an RC Category recorded.")
+            st.download_button("📥 Excel", to_excel_bytes(df_r1, "RC_Category_L1"),
+                               "rc_category_l1.xlsx",
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="dl_r1")
+
+            _r_pick = st.selectbox("🔍 Explode an RC Category into L2",
+                                   ["— select —"] + df_r1["cat"].tolist(), key="r1_drill")
+            if _r_pick != "— select —":
+                df_r2 = _q(f"""SELECT COALESCE(c.rc_category_l2,'(L2 not recorded)') AS sub, COUNT(*) AS n
+                               FROM capa c JOIN nc USING(nc_id)
+                               WHERE c.rc_category_l1 = ?{_rc_flt}
+                               GROUP BY sub ORDER BY n DESC""", [_r_pick] + _BF_PR)
+                if not df_r2.empty:
+                    figd = px.bar(df_r2, x="n", y="sub", orientation="h",
+                                  color_discrete_sequence=["#5A63A0"], text="n")
+                    figd.update_layout(height=max(160, 42 * len(df_r2)), margin=dict(l=0, r=0, t=10, b=0),
+                                       showlegend=False, yaxis=dict(categoryorder="total ascending"),
+                                       xaxis_title="", yaxis_title="")
+                    figd.update_traces(textposition="outside",
+                                       hovertemplate="<b>%{y}</b><br>NCs: %{x}<extra></extra>")
+                    st.plotly_chart(figd, use_container_width=True, config=CHART_CONFIG, key="r2_chart")
+                    st.caption(f"L2 breakdown for **{_r_pick}**.")
+        else:
+            st.info("No RC Category recorded for the current selection.")
+
+    st.markdown("")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # COMPLETE REPORT — one workbook with every chart's data + the filter context
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("---")
@@ -961,6 +1086,8 @@ with st.container(border=True):
         ("Production_vs_Supplier", "df_ps"),
         ("Owner_Workload", "df_own"),
         ("NC_Total_per_Year", "df_yr"),
+        ("Origin_Area_L1", "df_o1"),
+        ("RC_Category_L1", "df_r1"),
         ("Data_Quality", "incomplete"),
     ]:
         _d = globals().get(_var)
