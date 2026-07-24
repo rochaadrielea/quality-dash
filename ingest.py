@@ -2,16 +2,25 @@
 ingest.py
 ---------
 Reads NCR_Cutover_Tracker.xlsx AND NC_s_Overview (SAP export),
-cleans, merges (deduplicates 173 overlapping NCs), loads to SQLite.
+cleans, merges (deduplicates overlapping NCs), loads to SQLite.
 
 Two files in data/:
-  - NCR_Cutover_Tracker*.xlsx  → active tracker (251 NCs, owner/disposition detail)
-  - NC_s_Overview*.xlsx        → SAP full history (4498 NCs, CoPQ/leadtime/defect)
+  - NCR_Cutover_Tracker*.xlsx  → active tracker (owner/disposition detail)
+  - NC_s_Overview*.xlsx        → SAP full history (CoPQ/leadtime/defect)
+  - *CAPA*.xls[xm]             → CAPA/RCA tracker (optional)
 
 Merge logic:
-  - 173 NCs exist in both → enriched: tracker fields + SAP fields, source='both'
-  - 65+ tracker-only (EZ1, Blackout, TC) → source='tracker'
-  - 4325 SAP-only (historical) → source='sap'
+  - NCs in both files    → enriched: tracker fields + SAP fields, source='both'
+  - Tracker-only rows    → source='tracker'
+  - SAP-only rows        → source='sap'
+
+CAPA table:
+  - Keyed on (nc_id, capa_type). NC/SCAR Number is the foreign key to nc.nc_id.
+  - Keeps ALL three types (RCA / CA / PA) — one row per NC per type.
+  - Origin Area / RC Category L1+L2 are only populated on RCA rows by design;
+    CA and PA rows exist to record that the action exists, not a root cause.
+  - Where the same (nc_id, capa_type) appears more than once, the row carrying
+    the most content wins (an all-N/A duplicate never beats a filled row).
 
 Run daily/weekly to refresh. Idempotent (safe to re-run).
 
@@ -32,6 +41,53 @@ DB_FILE = "quality.db"
 TRACKER_SHEET = "NC_Tracker_Black_Out"
 CAPA_GLOB = "*CAPA*.xls*"      # matches .xlsx AND .xlsm (the real file is macro-enabled)
 CAPA_SHEET = "Requestor"
+# RCA / CA / PA are the internal actions. EXT-8D is the external supplier 8D —
+# it IS a corrective-action record, so an NC that only carries an Ext-8D still
+# "has a CAPA". Dropping it (as this list used to) made 131 covered NCs read as
+# 'CAPA open' on the burnout. It is kept as its own type so the RCA-only views
+# (pizza, root-cause) are unaffected — they filter capa_type='RCA' explicitly.
+CAPA_TYPES = ["RCA", "CA", "PA", "EXT-8D"]
+
+# Column maps live at module level so validate.py can check the real mapping
+# rather than a hand-kept copy of it. Two lists that can disagree WILL disagree:
+# an earlier version of validate.py had its own list, and warned that 'NC Type',
+# 'Failure' and 'Material' were unrecognised columns while load_tracker was
+# reading all three quite happily.
+TRACKER_COL_MAP = {
+    "System": "system",
+    "ID-Blackout": "nc_id",            # was "Title"
+    "Title": "nc_id",                  # fallback for old snapshots
+    "NC Type": "nc_type",
+    "TC ID": "tc_id",
+    "Migrated to EZ1": "migrated_to_ez1",
+    "Project": "project",              # was "Project + Flight Unit"
+    "Project + Flight Unit": "project",# fallback
+    "Flight Unit": "flight_unit",      # new dedicated column
+    "Detection": "detection_area",
+    "Title and Problem Description": "description",  # was "Description"
+    "Description": "description",      # fallback
+    "Failure": "failure",
+    "Material": "material",
+    "Batch": "batch",
+    "Issue Owner (QA/PA)": "owner",
+    "Issue Owner": "owner",            # fallback
+    "Created On": "created_on",
+    "NRB disposition": "nrb_disposition",
+    "Disposition Implemented Date": "disposition_date",
+    "Classification": "classification",
+    "PSP ref.": "psp_ref",
+    "NC WBS (EzyOne)": "nc_wbs",
+    "Status": "status",                # was "Notific. Status"
+    "Notific. Status": "status",       # fallback
+    "Closure date": "closure_date",
+    "Supplier name": "supplier_name",
+}
+
+# Columns whose absence actually breaks something downstream. The rest of
+# TRACKER_COL_MAP is either optional or has a fallback spelling.
+TRACKER_REQUIRED_COLS = [
+    "System", "ID-Blackout", "Issue Owner (QA/PA)", "Created On", "Status",
+]
 
 
 # ---- FILE FINDERS ----
@@ -63,15 +119,38 @@ def clean_classification(val):
 
 
 def clean_owner(val):
+    """Normalise 'Issue Owner (QA/PA)' to one canonical spelling per person.
+
+    The tracker has no naming standard: the same person is entered as a bare
+    first name on some rows and a full name on others, which splits their NC
+    count across two owner values and undercounts everyone on the dashboard
+    (verified against NCR_Cutover_Tracker_14_07_2026: Vitaly 34 + Vitaly Meshin
+    11, Rikard 26 + Rikard Bjon 9, Tiziano 33 + Tiziano Casarico 3, and so on).
+
+    Only unambiguous cases are mapped — a bare first name that matches exactly
+    one full name elsewhere in the file. Deliberately NOT mapped, by Adriele's
+    decision, and left exactly as typed:
+      - 'Güven', 'Nikolaos'  — no full name appears anywhere in the tracker
+      - 'E.Martins/ R. Bjon', 'Vitaly /Salvatore', 'Vitaly/ Domingos'
+                             — two people on one NC; the data model has one
+                               owner per NC, so these stay as their own value
+                               rather than silently crediting one person
+    """
     if pd.isna(val) or not str(val).strip() or str(val).strip() == '\xa0':
         return None
     v = str(val).strip()
     aliases = {
+        # bare first name -> the single full name it maps to
+        "Vitaly": "Vitaly Meshin",
+        "Rikard": "Rikard Bjon",
+        "Tiziano": "Tiziano Casarico",
+        "Noel": "Noel Orwa",
+        "Joaquin": "Joaquin Vera Rubio",
         "Domingos": "Domingos Moreira",
+        # long form -> short canonical form
+        "Domingos Manuel Ferreira Moreira": "Domingos Moreira",
         "Noel Kenoreny Orwa": "Noel Orwa",
         "S. Scampini": "Simone Scampini",
-        "Vitaly /Salvatore": "Vitaly Meshin",
-        "Vitaly/ Domingos": "Vitaly Meshin",
     }
     return aliases.get(v, v)
 
@@ -137,9 +216,6 @@ def parse_date(val):
         return None
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 1: Load the NCR Cutover Tracker
-# ══════════════════════════════════════════════════════════════════════════════
 def clean_level(val):
     """Clean an Origin/RC level value. '0', 'N/A', blank -> None (not recorded)."""
     if pd.isna(val):
@@ -154,10 +230,27 @@ def clean_level(val):
     return v
 
 
+def clean_capa_type(val):
+    """Normalise the CAPA Type column to RCA / CA / PA. Anything else -> None."""
+    if pd.isna(val):
+        return None
+    v = str(val).strip().upper()
+    if v in ("", "NAN", "N/A", "NA", "NONE", "-"):
+        return None
+    return v if v in CAPA_TYPES else None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 1: Load the CAPA / RCA tracker
+# ══════════════════════════════════════════════════════════════════════════════
 def load_capa():
     """Load the CAPA / RCA tracker. OPTIONAL — returns None if the file isn't in data/.
 
-    Keeps RCA rows only (one row per NC; CA/PA rows carry no root cause).
+    Keyed on (nc_id, capa_type): every NC can carry an RCA row, a CA row and a
+    PA row. All three are kept — the presence of a CA/PA row is itself the fact
+    being reported, even though the root-cause columns on those rows are N/A by
+    design.
+
     Header row is auto-detected so a banner row above it won't break the load.
     """
     path = find_file(CAPA_GLOB)
@@ -198,6 +291,9 @@ def load_capa():
     if c_nc is None:
         print(f"  ! No 'NC/SCAR Number' column found. Columns: {list(df.columns)[:12]} — skipping.")
         return None
+    if c_type is None:
+        print(f"  ! No 'CAPA Type' column found. Columns: {list(df.columns)[:12]} — skipping.")
+        return None
 
     def _clean_id(x):
         # Match the SAP loader's nc_id format exactly, or the join silently fails
@@ -218,7 +314,10 @@ def load_capa():
 
     out = pd.DataFrame()
     out["nc_id"] = df[c_nc].apply(_clean_id)
-    out["capa_type"] = df[c_type].astype(str).str.strip() if c_type else None
+    out["capa_type"] = df[c_type].apply(clean_capa_type)
+
+    # Root-cause levels — populated on RCA rows only, by design.
+    _level_cols = []
     for tgt, src in [
         ("origin_area_l1", pick("(Real) Origin Area L1", "Origin Area L1")),
         ("origin_area_l2", pick("(Real) Origin Area L2", "Origin Area L2")),
@@ -226,32 +325,61 @@ def load_capa():
         ("rc_category_l2", pick("RC Category L2")),
     ]:
         out[tgt] = df[src].apply(clean_level) if src else None
+        _level_cols.append(tgt)
+
+    # Context columns. 'responsible' differs per capa_type on the same NC —
+    # the person who owns the analysis is not always the one who owns the action.
+    _ctx_cols = []
     for tgt, src in [
         ("capa_project", pick("Affected Project")),
         ("requestor", pick("Requestor")),
         ("responsible", pick("Responsible")),
         ("capa_created_on", pick("Creation date requestor")),
+        ("problem_description", pick("Problem Description")),
     ]:
         out[tgt] = df[src].apply(clean_text) if src else None
+        _ctx_cols.append(tgt)
 
+    n_raw = len(out)
     out = out[out["nc_id"].notna()].copy()
+    n_no_id = n_raw - len(out)
 
-    # RCA rows only -> one row per NC, and the row that carries the root cause
-    if c_type:
-        rca = out[out["capa_type"].str.upper() == "RCA"].copy()
-        if rca.empty:
-            print("  ! No RCA rows found; keeping all CAPA rows instead.")
-        else:
-            out = rca
-    out = out.drop_duplicates(subset=["nc_id"], keep="last")
+    n_before_type = len(out)
+    out = out[out["capa_type"].notna()].copy()
+    n_bad_type = n_before_type - len(out)
 
+    # ---- Dedup on (nc_id, capa_type), keeping the row with the most content ----
+    # The same NC+type can appear twice: once filled, once all-N/A. Sorting by
+    # content score and keeping the last means a filled row always wins over a
+    # blank one, regardless of the order they sit in the sheet.
+    _score_cols = _level_cols + _ctx_cols
+    out["_score"] = out[_score_cols].notna().sum(axis=1)
+    out = (out.sort_values(["nc_id", "capa_type", "_score"], kind="stable")
+              .drop_duplicates(subset=["nc_id", "capa_type"], keep="last")
+              .drop(columns=["_score"])
+              .reset_index(drop=True))
+    n_dupes = (n_before_type - n_bad_type) - len(out)
+
+    # ---- Reporting ----
+    _by_type = out["capa_type"].value_counts().to_dict()
+    n_ncs = out["nc_id"].nunique()
     n_o1 = out["origin_area_l1"].notna().sum()
     n_r1 = out["rc_category_l1"].notna().sum()
-    print(f"  {len(out)} CAPA rows (RCA, one per NC). "
-          f"Origin L1 filled: {n_o1} | RC Category L1 filled: {n_r1}")
+    n_rca = _by_type.get("RCA", 0)
+
+    print(f"  {len(out)} CAPA rows across {n_ncs} NCs "
+          f"(RCA: {_by_type.get('RCA', 0)} | CA: {_by_type.get('CA', 0)} | PA: {_by_type.get('PA', 0)})")
+    if n_no_id or n_bad_type or n_dupes:
+        print(f"    dropped: {n_no_id} no NC number | {n_bad_type} unrecognised CAPA type "
+              f"| {n_dupes} duplicate (nc_id, capa_type)")
+    print(f"    Origin L1 filled: {n_o1}/{n_rca} RCA rows | "
+          f"RC Category L1 filled: {n_r1}/{n_rca} RCA rows")
     return out
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 2: Load the NCR Cutover Tracker
+# ══════════════════════════════════════════════════════════════════════════════
 def load_tracker():
     """Load and clean the NCR Cutover Tracker."""
     f = find_file("NCR_Cutover_Tracker*.xlsx")
@@ -271,36 +399,9 @@ def load_tracker():
     if _title_col:
         df = df[df[_title_col].astype(str) != "NC_EXAMPLE"].copy()
 
-    # Column mapping — updated for 2026-07 tracker schema
-    # (old schema names kept as fallbacks so older snapshots still load)
-    col_map = {
-        "System": "system",
-        "ID-Blackout": "nc_id",            # was "Title"
-        "Title": "nc_id",                  # fallback for old snapshots
-        "TC ID": "tc_id",
-        "Migrated to EZ1": "migrated_to_ez1",
-        "Project": "project",              # was "Project + Flight Unit"
-        "Project + Flight Unit": "project",# fallback
-        "Flight Unit": "flight_unit",      # new dedicated column
-        "Detection": "detection_area",
-        "Title and Problem Description": "description",  # was "Description"
-        "Description": "description",      # fallback
-        "Failure": "failure",
-        "Material": "material",
-        "Batch": "batch",
-        "Issue Owner (QA/PA)": "owner",
-        "Issue Owner": "owner",            # fallback
-        "Created On": "created_on",
-        "NRB disposition": "nrb_disposition",
-        "Disposition Implemented Date": "disposition_date",
-        "Classification": "classification",
-        "PSP ref.": "psp_ref",
-        "NC WBS (EzyOne)": "nc_wbs",
-        "Status": "status",                # was "Notific. Status"
-        "Notific. Status": "status",       # fallback
-        "Closure date": "closure_date",
-        "Supplier name": "supplier_name",
-    }
+    # Column mapping — see TRACKER_COL_MAP at module level. Kept there so
+    # validate.py checks the same map the ingest actually uses.
+    col_map = TRACKER_COL_MAP
     df = df.rename(columns=col_map)
     # Rename can create duplicate target names (old+new schema both mapped) —
     # keep the first non-empty occurrence of each.
@@ -325,7 +426,21 @@ def load_tracker():
             df[col] = df[col].apply(clean_text)
 
     # Derived
-    df["is_open"] = df["status"].isin(["OPEN"]).astype(int)
+    # Three states, not two. A blank Status is NOT 'closed' — treating it as
+    # closed (which `is_open = status == 'OPEN'` silently did) removed those NCs
+    # from every open-NC view, and is how owners' counts came out short. There
+    # are 19 such rows in the 14/07 tracker across 8 owners. They are now
+    # is_open = NULL: neither open nor closed, and visible as '(no status)'.
+    def _state(s):
+        # clean_status returns None, but pandas stores that as NaN (a float),
+        # so test with isna() rather than `is None`.
+        if pd.isna(s):
+            return "(no status)"
+        s = str(s)
+        return "Open" if s == "OPEN" else ("Closed" if s == "CLOSED" else s.title())
+
+    df["is_open"] = df["status"].map({"OPEN": 1, "CLOSED": 0})
+    df["status_state"] = df["status"].apply(_state)
     df["is_supplier_nc"] = df["supplier_name"].notna().astype(int)
     df["days_open"] = (
         pd.to_datetime("today").normalize() - pd.to_datetime(df["created_on"], errors="coerce")
@@ -344,7 +459,7 @@ def load_tracker():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 2: Load the SAP NC Overview
+# STEP 3: Load the SAP NC Overview
 # ══════════════════════════════════════════════════════════════════════════════
 def load_sap_overview():
     """Load and clean the SAP NC Overview export."""
@@ -428,8 +543,18 @@ def load_sap_overview():
     df["created_on"] = df["created_on"].apply(parse_sap_date)
     df["closure_date"] = df["closure_date"].apply(parse_sap_date)
 
-    # Derived
-    df["is_open"] = df["status"].isin(["OPEN"]).astype(int) if "status" in df.columns else 0
+    # Derived — three states, same as the tracker (see load_tracker).
+    if "status" in df.columns:
+        def _state(s):
+            if pd.isna(s):
+                return "(no status)"
+            s = str(s)
+            return "Open" if s == "OPEN" else ("Closed" if s == "CLOSED" else s.title())
+        df["is_open"] = df["status"].map({"OPEN": 1, "CLOSED": 0})
+        df["status_state"] = df["status"].apply(_state)
+    else:
+        df["is_open"] = None
+        df["status_state"] = "(no status)"
     df["is_supplier_nc"] = df.get("notification_type", pd.Series()).astype(str).str.contains("Z2", na=False).astype(int)
 
     # Classification from defect class
@@ -475,7 +600,7 @@ def load_sap_overview():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 3: Merge
+# STEP 4: Merge
 # ══════════════════════════════════════════════════════════════════════════════
 def merge_data(tracker_df, sap_df):
     """Merge tracker + SAP, deduplicating on SAP notification number."""
@@ -536,16 +661,24 @@ def merge_data(tracker_df, sap_df):
         if col not in merged.columns:
             merged[col] = None
 
-    # Recalculate is_open for all rows (in case SAP data filled closure_date)
+    # Recalculate is_open for all rows (in case SAP data filled closure_date).
+    # Rows whose status is still blank keep is_open = NULL — they are neither
+    # open nor closed, and must not be silently bucketed into either.
     merged.loc[merged["status"] == "CLOSED", "is_open"] = 0
     merged.loc[merged["status"] == "OPEN", "is_open"] = 1
+    if "status_state" not in merged.columns:
+        merged["status_state"] = merged["status"].apply(
+            lambda s: "(no status)" if pd.isna(s) or not str(s).strip()
+            else ("Open" if s == "OPEN" else ("Closed" if s == "CLOSED" else str(s).title())))
+    else:
+        merged["status_state"] = merged["status_state"].fillna("(no status)")
 
     print(f"  Merged total: {len(merged)} rows")
     return merged
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 4: Write to SQLite
+# STEP 5: Write to SQLite
 # ══════════════════════════════════════════════════════════════════════════════
 def write_db(df, capa=None):
     """Write merged DataFrame to SQLite. Optionally write the CAPA table too."""
@@ -557,7 +690,10 @@ def write_db(df, capa=None):
     cur.execute("DROP TABLE IF EXISTS capa")
     if capa is not None and not capa.empty:
         capa.to_sql("capa", conn, if_exists="replace", index=False)
+        # (nc_id, capa_type) is the natural key — index it as such
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_capa_key ON capa(nc_id, capa_type)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_capa_nc ON capa(nc_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_capa_type ON capa(capa_type)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_capa_o1 ON capa(origin_area_l1)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_capa_rc1 ON capa(rc_category_l1)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_nc_project ON nc(project)")
@@ -574,40 +710,101 @@ def write_db(df, capa=None):
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
+def copy_warnings_to_db(conn, warn_db="warnings.db"):
+    """Mirror the warning log into quality.db as a read-only copy.
+
+    warnings.db stays the master — quality.db is dropped and rebuilt on every
+    ingest, so the log cannot live here or it would be wiped each run. This
+    copy exists purely so the dashboard can query warnings alongside NCs
+    without opening a second database.
+    """
+    if not Path(warn_db).exists():
+        return 0
+    try:
+        with sqlite3.connect(warn_db) as wc:
+            df = pd.read_sql("SELECT * FROM warnings", wc)
+    except Exception as e:
+        print(f"  ! Could not read {warn_db}: {e}")
+        return 0
+    if df.empty:
+        return 0
+    df.to_sql("warnings", conn, if_exists="replace", index=False)
+    cur = conn.cursor()
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_warn_check ON warnings(check_name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_warn_subject ON warnings(subject)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_warn_sev ON warnings(severity)")
+    conn.commit()
+    return len(df)
+
+
 def main():
     print("=" * 60)
     print("Quality DB Ingest — Merge Tracker + SAP Overview")
     print("=" * 60)
 
-    print("\n[1/5] Loading NCR Cutover Tracker...")
+    print("\n[1/6] Validating source files...")
+    try:
+        from validate import run_checks
+        _t = find_file("NCR_Cutover_Tracker*.xlsx")
+        _s = find_file("NC_s_Overview*.xlsx")
+        if _t:
+            run_checks(_t, _s, clean_owner, TRACKER_SHEET)
+        else:
+            print("  No tracker found — skipping validation.")
+    except ImportError:
+        print("  validate.py not found — skipping checks.")
+    except Exception as e:
+        # Validation must never stop the ingest.
+        print(f"  ! Validation error (ingest continues): {e}")
+
+    print("\n[2/6] Loading NCR Cutover Tracker...")
     tracker = load_tracker()
 
-    print("\n[2/5] Loading SAP NC Overview...")
+    print("\n[3/6] Loading SAP NC Overview...")
     sap = load_sap_overview()
 
-    print("\n[3/5] Merging (deduplicating overlaps)...")
+    print("\n[4/6] Merging (deduplicating overlaps)...")
     merged = merge_data(tracker, sap)
 
-    print("\n[4/5] Loading CAPA / RCA tracker (optional)...")
+    print("\n[5/6] Loading CAPA / RCA tracker (optional)...")
     capa = load_capa()
 
-    print("\n[5/5] Writing to SQLite...")
+    print("\n[6/6] Writing to SQLite...")
     conn = write_db(merged, capa)
 
-    # Summary
+    # Mirror the warning log into quality.db so the dashboard can read it.
+    # Runs after write_db because that call replaces the whole file.
+    # The CAPA orphan check has to run here too: it compares the capa table to
+    # the nc table, so it needs the database that was just written — it cannot
+    # be answered from the source files alone.
+    try:
+        from validate import _connect, check_capa_orphans
+        _wc = _connect()
+        _no = check_capa_orphans(_wc, DB_FILE)
+        _wc.commit(); _wc.close()
+        if _no:
+            print(f"  ! {_no} CAPA NC number(s) match no NC — logged, left unmatched")
+    except Exception as e:
+        print(f"  ! CAPA orphan check skipped: {e}")
+
+    _nw = copy_warnings_to_db(conn)
+    if _nw:
+        print(f"  {_nw} warning(s) copied into quality.db (master stays warnings.db)")
+
+    # Summary. is_open is now three-state (1 / 0 / NULL), so the counts must use
+    # explicit IS NULL rather than 1 - is_open, which returns NULL for blanks.
     stats = pd.read_sql("""
         SELECT
             COUNT(*) AS total,
-            SUM(is_open) AS open_count,
-            SUM(1 - is_open) AS closed_count,
+            SUM(CASE WHEN is_open = 1 THEN 1 ELSE 0 END) AS open_count,
+            SUM(CASE WHEN is_open = 0 THEN 1 ELSE 0 END) AS closed_count,
+            SUM(CASE WHEN is_open IS NULL THEN 1 ELSE 0 END) AS no_status_count,
             SUM(CASE WHEN source = 'tracker' THEN 1 ELSE 0 END) AS tracker_only,
             SUM(CASE WHEN source = 'sap' THEN 1 ELSE 0 END) AS sap_only,
             SUM(CASE WHEN source = 'both' THEN 1 ELSE 0 END) AS in_both,
             SUM(CASE WHEN project IS NULL THEN 1 ELSE 0 END) AS blank_project,
             SUM(CASE WHEN detection_area IS NULL THEN 1 ELSE 0 END) AS blank_detection,
-            SUM(CASE WHEN owner IS NULL THEN 1 ELSE 0 END) AS blank_owner,
-            0 AS has_copq
-            
+            SUM(CASE WHEN owner IS NULL THEN 1 ELSE 0 END) AS blank_owner
         FROM nc
     """, conn)
 
@@ -616,9 +813,60 @@ def main():
     print("=" * 60)
     print(stats.T.to_string(header=False))
 
+    # Owner counts — the number people actually check. Printed every run so a
+    # split or a drop is visible immediately rather than reported by an owner.
+    own = pd.read_sql("""
+        SELECT COALESCE(owner,'(no owner)') AS owner,
+               COUNT(*) AS total,
+               SUM(CASE WHEN is_open=1 THEN 1 ELSE 0 END) AS open,
+               SUM(CASE WHEN is_open IS NULL THEN 1 ELSE 0 END) AS no_status
+        FROM nc WHERE source IN ('tracker','both')
+        GROUP BY owner ORDER BY total DESC
+    """, conn)
+    print("\n" + "=" * 60)
+    print("NCs per owner (from the tracker — SAP has no owner field):")
+    print("=" * 60)
+    print(own.to_string(index=False))
+
+    # CAPA coverage — how many NCs in the DB actually carry each action type.
+    # This is the number the dashboard's coverage KPI reports on.
+    if capa is not None and not capa.empty:
+        cov = pd.read_sql("""
+            SELECT
+                (SELECT COUNT(*) FROM nc) AS nc_total,
+                COUNT(DISTINCT c.nc_id) AS ncs_with_any_capa,
+                COUNT(DISTINCT CASE WHEN c.capa_type='RCA' THEN c.nc_id END) AS ncs_with_rca,
+                COUNT(DISTINCT CASE WHEN c.capa_type='CA'  THEN c.nc_id END) AS ncs_with_ca,
+                COUNT(DISTINCT CASE WHEN c.capa_type='PA'  THEN c.nc_id END) AS ncs_with_pa
+            FROM capa c JOIN nc n ON n.nc_id = c.nc_id
+        """, conn)
+        print("\n" + "=" * 60)
+        print("CAPA coverage (joined to nc):")
+        print("=" * 60)
+        print(cov.T.to_string(header=False))
+
+        # Orphans: CAPA rows whose NC number doesn't exist in nc. If this is
+        # large the foreign key isn't matching and the join is silently lossy.
+        orph = pd.read_sql("""
+            SELECT COUNT(DISTINCT c.nc_id) AS n
+            FROM capa c LEFT JOIN nc n ON n.nc_id = c.nc_id
+            WHERE n.nc_id IS NULL
+        """, conn).iloc[0]["n"]
+        if orph:
+            print(f"\n  ⚠ {orph} NC number(s) in the CAPA tracker have no match in `nc`.")
+            ex = pd.read_sql("""
+                SELECT DISTINCT c.nc_id
+                FROM capa c LEFT JOIN nc n ON n.nc_id = c.nc_id
+                WHERE n.nc_id IS NULL LIMIT 10
+            """, conn)["nc_id"].tolist()
+            print(f"    e.g. {ex}")
+            print("    Check the nc_id format matches on both sides before trusting coverage.")
+
     conn.close()
     print(f"\n✓ Database written to: {DB_FILE}")
     print(f"  Tracker: {len(tracker)} rows | SAP: {len(sap)} rows | Merged: {len(merged)} rows")
+    if capa is not None and not capa.empty:
+        print(f"  CAPA: {len(capa)} rows across {capa['nc_id'].nunique()} NCs")
 
 
 if __name__ == "__main__":
