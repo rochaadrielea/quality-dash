@@ -200,9 +200,21 @@ def render():
     k[3].metric("Coverage", f"{(100*done/tot):.0f}%" if tot else "—")
 
     # ---- the zoomable pizza (sunburst) + RCA-by-department -------------
+    nxt = levels[len(path)] if len(path) < len(levels) else None
     left, right = st.columns([3, 2])
     with left:
         st.subheader("Click a slice to zoom in · centre to zoom out")
+        # A selectbox that ALWAYS drills, so the tab works even on a Streamlit
+        # too old for click-to-zoom. Key changes with depth so it resets to
+        # '— all —' after each drill instead of re-firing the old choice.
+        if nxt and not df.empty:
+            _opts = ["— all —"] + sorted(str(v) for v in df[nxt].dropna().unique())
+            _pick = st.selectbox(f"Drill into {nxt}", _opts,
+                                 key=f"capa_drill_{len(path)}")
+            if _pick and _pick != "— all —":
+                st.session_state.capa_path.append(_pick)
+                st.rerun()
+
         remaining = levels[len(path):] + ["CAPA"]
         color = "CAPA" if show_by == "CAPA status" else "Class"
         cmap = STATUS_COLORS if show_by == "CAPA status" else None
@@ -217,19 +229,21 @@ def render():
                 insidetextorientation="radial",
                 hovertemplate="<b>%{label}</b><br>%{value} NCs<extra></extra>")
             fig.update_layout(margin=dict(t=10, l=0, r=0, b=0), height=460)
-            sel = st.plotly_chart(fig, width='stretch',
-                                  on_select="rerun", key="sunburst")
-            # a click on the first ring drills one level down
+            # Interactive click-to-drill needs streamlit >= 1.35 (on_select).
+            # If this Streamlit is older, fall back to a plain chart — the
+            # selectbox above still drills, so the tab never breaks.
+            clicked = None
             try:
-                pts = sel["selection"]["points"] if sel else []
+                sel = st.plotly_chart(fig, width='stretch',
+                                      on_select="rerun", key="sunburst")
+                pts = (sel or {}).get("selection", {}).get("points", [])
                 if pts:
-                    label = pts[0].get("label")
-                    nxt = levels[len(path)] if len(path) < len(levels) else None
-                    if label and nxt and label in set(df[nxt]):
-                        st.session_state.capa_path.append(label)
-                        st.rerun()
-            except Exception:
-                pass
+                    clicked = pts[0].get("label")
+            except TypeError:
+                st.plotly_chart(fig, width='stretch', key="sunburst_static")
+            if clicked and nxt and clicked in set(df[nxt].astype(str)):
+                st.session_state.capa_path.append(clicked)
+                st.rerun()
 
     with right:
         st.subheader("RCA by department")
